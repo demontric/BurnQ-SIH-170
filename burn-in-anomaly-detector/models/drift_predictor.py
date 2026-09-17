@@ -1,64 +1,54 @@
 import pandas as pd
 import numpy as np
-from scipy.optimize import curve_fit
+import os
+import onnxruntime as ort
+
+from preprocessing.features import engineer_features, DRIFT_MODEL_FEATURES
 
 def predict_168h(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Input: df with value_0h, value_24h columns
+    Input: df with value_0h, value_24h, value_96h columns
     Returns df with added columns:
     - predicted_168h: forecasted value
     - safety_slope_exceeded: bool
-    - confidence_interval: tuple (low, high), optional
     """
     out_df = df.copy()
     
-    # Initialize columns
-    out_df['predicted_168h'] = np.nan
-    out_df['safety_slope_exceeded'] = False
+    # Map lowercase to expected uppercase schema if needed
+    rename_mapping = {}
+    for col in ['value_0h', 'value_24h', 'value_96h', 'value_168h']:
+        if col in out_df.columns:
+            rename_mapping[col] = col.replace('value_', 'Value_')
+    if 'datasheet_limit' in out_df.columns and 'datasheet_limit_uA' not in out_df.columns:
+        rename_mapping['datasheet_limit'] = 'datasheet_limit_uA'
+
+    feat_df = out_df.rename(columns=rename_mapping)
     
-    # Process per parameter to calculate safety slopes
-    for param, group in out_df.groupby('parameter'):
-        idx = group.index
+    if 'datasheet_limit_uA' not in feat_df.columns:
+        feat_df['datasheet_limit_uA'] = 50.0
+
+    # Engineer features (only 0-96h history safe)
+    feat = engineer_features(feat_df, include_168h=False)
+    X_drift = feat[DRIFT_MODEL_FEATURES].values.astype(np.float32)
+
+    # Load ONNX model
+    model_path = os.path.join(os.path.dirname(__file__), "..", "exports", "drift_model.onnx")
+    sess = ort.InferenceSession(model_path)
+    
+    # Predict
+    preds = sess.run(None, {"input": X_drift})[0]
+    
+    if len(preds.shape) > 1 and preds.shape[1] == 1:
+        preds = preds.flatten()
         
-        # Calculate drift rate from 0h to 24h
-        drift_rate_24h = group['value_24h'] - group['value_0h']
-        
-        # Heuristic: 95th percentile of drift among the population is the safety limit
-        # (In a real scenario, this would be computed on historical 'known good' parts)
+    out_df['predicted_168h'] = preds
+    
+    # Calculate safety slope flag simply
+    if 'value_24h' in out_df.columns and 'value_0h' in out_df.columns:
+        drift_rate_24h = out_df['value_24h'] - out_df['value_0h']
         safety_slope = np.percentile(drift_rate_24h.dropna(), 95)
+        out_df['safety_slope_exceeded'] = (drift_rate_24h > safety_slope)
+    else:
+        out_df['safety_slope_exceeded'] = False
         
-        predicted_vals = []
-        for index, row in group.iterrows():
-            v0 = row['value_0h']
-            v24 = row['value_24h']
-            
-            # Define saturation curve with fixed tau (since we only have 2 points for a 3 param model)
-            # V(t) = V0 + a * (1 - exp(-t/tau))
-            tau = 50.0 
-            
-            def saturation_curve(t, a):
-                return v0 + a * (1 - np.exp(-t / tau))
-                
-            try:
-                # Fit 'a' using the t=24 point
-                # curve_fit expects xdata, ydata
-                popt, _ = curve_fit(saturation_curve, [24], [v24], p0=[(v24 - v0)])
-                a_fit = popt[0]
-                
-                # Predict at 168h
-                pred_168 = saturation_curve(168, a_fit)
-                predicted_vals.append(pred_168)
-            except Exception:
-                # Fallback if fit fails
-                predicted_vals.append(np.nan)
-                
-        out_df.loc[idx, 'predicted_168h'] = predicted_vals
-        
-        # Flag if the initial drift exceeds safety slope
-        out_df.loc[idx, 'safety_slope_exceeded'] = (drift_rate_24h > safety_slope)
-        
-    # TODO: An XGBoost residual-correction model could plug in here.
-    # Features could include v0, v24, a_fit, param type, lot stats.
-    # out_df['predicted_168h_xgb'] = xgb_model.predict(features)
-    
     return out_df

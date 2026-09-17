@@ -49,7 +49,7 @@ async def predict_drift_endpoint(file: UploadFile = File(...)):
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
         
-        req_cols = ['value_0h', 'value_24h', 'parameter']
+        req_cols = ['value_0h', 'value_24h', 'value_96h', 'parameter']
         missing = [c for c in req_cols if c not in df.columns]
         if missing:
              raise ValueError(f"Missing required columns: {missing}")
