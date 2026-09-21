@@ -1,0 +1,68 @@
+# Python cache - anywhere
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+
+# Virtual environments - anywhere
+**/venv/
+**/.venv/
+**/env/
+**/.env/
+
+# Python packaging
+**/.Python
+**/build/
+**/develop-eggs/
+**/dist/
+**/downloads/
+**/eggs/
+**/.eggs/
+**/*.egg-info/
+**/wheels/
+
+# Testing / coverage
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/.tox/
+**/.nox/
+
+# Jupyter
+**/.ipynb_checkpoints/
+
+# Streamlit
+**/.streamlit/secrets.toml
+
+# Environment / secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# IDEs
+**/.vscode/
+**/.idea/
+
+# OS files
+**/.DS_Store
+**/Thumbs.db
+
+# Logs
+**/*.log
+
+# Temporary files
+**/*.tmp
+**/*.temp
+**/*.swp
+**/*.swo
+
+# Node.js if frontend components are present
+**/node_modules/
+**/.next/
+**/dist/
+
+# Local databases
+**/*.db
+**/*.sqlite
+**/*.sqlite3

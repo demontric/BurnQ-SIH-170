@@ -11,3 +11,5 @@ streamlit
 plotly
 python-multipart
 pytest
+flatbuffers==25.12.19
+onnxruntime==1.30.0

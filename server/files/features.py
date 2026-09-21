@@ -1,22 +1,3 @@
-"""
-features.py
-------------
-Feature engineering for the real synthetic_burnin_data.csv schema:
-ComponentID, Lot, Value_0h, Value_24h, Value_96h, Value_168h,
-true_label, datasheet_limit_uA, passes_static_limit
-
-Design notes
-------------
-- Only ONE measurement channel is available (a leakage-current-like value in
-  uA), so every feature below is derived from that single time series plus
-  the datasheet limit. This differs from the original multi-parameter design
-  in Step 1's synthetic prototype, but the same reliability-engineering
-  logic applies: trend, velocity, acceleration, and margin-to-spec.
-- Feature groups are split into "drift-model-safe" (only use 0h/24h/96h, no
-  168h) vs "full-history" (anomaly model, uses all 4 points) so the drift
-  regressor in Step 5 never leaks its own target.
-"""
-
 import numpy as np
 import pandas as pd
 
