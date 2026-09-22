@@ -1,122 +1,718 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { Fragment, useCallback, useMemo, useRef, useState } from 'react'
+import axios from 'axios'
+import ReactECharts from 'echarts-for-react'
+import {
+  Activity,
+  AlertTriangle,
+  ChevronDown,
+  Info,
+  LineChart,
+  Loader2,
+  Microscope,
+  TableProperties,
+  Target,
+  Upload,
+} from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 
-function App() {
-  const [count, setCount] = useState(0)
+const API_URL =
+  import.meta.env.VITE_API_URL ?? '/api/detect-anomaly'
+const TIME_LABELS = ['0h', '24h', '96h', '168h']
 
+function isFlagged(row) {
+  return Boolean(row.is_anomaly || row.safety_slope_exceeded)
+}
+
+function normalizeRow(row) {
+  return {
+    ComponentID:
+      row.ComponentID ?? row.component_id ?? row.part_id ?? row.PartID ?? '—',
+    Lot: row.Lot ?? row.lot_id ?? row.lot ?? '—',
+    Value_0h: Number(row.Value_0h ?? row.value_0h ?? 0),
+    Value_24h: Number(row.Value_24h ?? row.value_24h ?? 0),
+    Value_96h: Number(row.Value_96h ?? row.value_96h ?? 0),
+    Value_168h: Number(row.Value_168h ?? row.value_168h ?? 0),
+    predicted_168h:
+      row.predicted_168h != null ? Number(row.predicted_168h) : null,
+    robust_z_score:
+      row.robust_z_score != null ? Number(row.robust_z_score) : null,
+    is_anomaly: Boolean(row.is_anomaly),
+    safety_slope_exceeded: Boolean(row.safety_slope_exceeded),
+    justification:
+      row.justification ??
+      (isFlagged({
+        is_anomaly: row.is_anomaly,
+        safety_slope_exceeded: row.safety_slope_exceeded,
+      })
+        ? 'Flagged due to abnormal drift or statistical deviation.'
+        : 'Normal part.'),
+  }
+}
+
+function parseApiResponse(payload) {
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : []
+
+  const data = rows.map(normalizeRow)
+  const flagged_count =
+    payload?.flagged_count ?? data.filter(isFlagged).length
+
+  return {
+    total_components: payload?.total_components ?? data.length,
+    flagged_count,
+    data,
+  }
+}
+
+function computeMae(rows) {
+  const pairs = rows.filter(
+    (row) =>
+      row.predicted_168h != null &&
+      !Number.isNaN(row.predicted_168h) &&
+      !Number.isNaN(row.Value_168h),
+  )
+  if (pairs.length === 0) return null
+  const total = pairs.reduce(
+    (sum, row) => sum + Math.abs(row.predicted_168h - row.Value_168h),
+    0,
+  )
+  return total / pairs.length
+}
+
+function formatMicroamps(value) {
+  if (value == null || Number.isNaN(value)) return '—'
+  return `${value.toFixed(2)} µA`
+}
+
+function formatZScore(value) {
+  if (value == null || Number.isNaN(value)) return '—'
+  return value.toFixed(2)
+}
+
+function getStatusBadge(row) {
+  if (row.is_anomaly && row.safety_slope_exceeded) {
+    return (
+      <Badge variant="destructive" className="bg-red-500/20 text-red-300">
+        Anomaly + Drift
+      </Badge>
+    )
+  }
+  if (row.is_anomaly) {
+    return (
+      <Badge variant="destructive" className="bg-red-500/20 text-red-300">
+        Outlier
+      </Badge>
+    )
+  }
+  if (row.safety_slope_exceeded) {
+    return (
+      <Badge
+        variant="outline"
+        className="border-amber-500/50 bg-amber-500/15 text-amber-300"
+      >
+        Drift Risk
+      </Badge>
+    )
+  }
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+    <Badge variant="secondary" className="bg-slate-800 text-slate-300">
+      Pass
+    </Badge>
   )
 }
 
-export default App
+function getFlaggedColor(row) {
+  if (row.is_anomaly) return '#ef4444'
+  if (row.safety_slope_exceeded) return '#f59e0b'
+  return '#94a3b8'
+}
+
+function buildChartOption(rows, datasheetLimit) {
+  const series = []
+  const legendEntries = []
+
+  rows.forEach((row) => {
+    const flagged = isFlagged(row)
+    const trajectory = [
+      row.Value_0h,
+      row.Value_24h,
+      row.Value_96h,
+      row.Value_168h,
+    ]
+
+    series.push({
+      name: row.ComponentID,
+      type: 'line',
+      data: trajectory,
+      symbol: flagged ? 'circle' : 'none',
+      symbolSize: flagged ? 6 : 0,
+      lineStyle: {
+        color: flagged ? getFlaggedColor(row) : '#64748b',
+        width: flagged ? 2.5 : 1,
+        opacity: flagged ? 0.85 : 0.15,
+      },
+      itemStyle: {
+        color: getFlaggedColor(row),
+        opacity: flagged ? 0.85 : 0.15,
+      },
+      emphasis: {
+        lineStyle: { width: flagged ? 3.5 : 1.5, opacity: 1 },
+      },
+      z: flagged ? 10 : 1,
+    })
+
+    if (flagged && row.predicted_168h != null) {
+      series.push({
+        name: `${row.ComponentID} (predicted)`,
+        type: 'line',
+        data: [null, null, row.Value_96h, row.predicted_168h],
+        symbol: ['none', 'none', 'circle', 'diamond'],
+        symbolSize: 7,
+        lineStyle: {
+          color: getFlaggedColor(row),
+          width: 2,
+          type: 'dashed',
+          opacity: 0.85,
+        },
+        itemStyle: { color: getFlaggedColor(row) },
+        z: 11,
+      })
+      legendEntries.push(`${row.ComponentID} (predicted)`)
+    }
+
+    if (flagged) legendEntries.push(row.ComponentID)
+  })
+
+  return {
+    backgroundColor: 'transparent',
+    animation: rows.length < 300,
+    grid: { left: 56, right: 24, top: 48, bottom: 48 },
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: '#0f172a',
+      borderColor: '#334155',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+      formatter(params) {
+        if (!params?.seriesName) return ''
+        const label = params.name || TIME_LABELS[params.dataIndex] || ''
+        const value =
+          params.value != null && !Number.isNaN(params.value)
+            ? `${Number(params.value).toFixed(2)} µA`
+            : '—'
+        return `<strong>${params.seriesName.replace(' (predicted)', '')}</strong><br/>${label}: ${value}`
+      },
+    },
+    legend: {
+      type: 'scroll',
+      top: 8,
+      right: 16,
+      textStyle: { color: '#94a3b8', fontSize: 11 },
+      data: [...new Set(legendEntries)],
+      show: legendEntries.length > 0 && legendEntries.length <= 20,
+    },
+    xAxis: {
+      type: 'category',
+      data: TIME_LABELS,
+      axisLine: { lineStyle: { color: '#475569' } },
+      axisLabel: { color: '#94a3b8' },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Parameter Value (µA)',
+      nameTextStyle: { color: '#94a3b8', padding: [0, 0, 0, 8] },
+      axisLine: { show: false },
+      axisLabel: { color: '#94a3b8' },
+      splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
+    },
+    series: [
+      ...series,
+      {
+        name: 'Datasheet Limit',
+        type: 'line',
+        data: [],
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          lineStyle: { color: '#fb923c', type: 'dotted', width: 2 },
+          label: {
+            formatter: `Datasheet Limit (${datasheetLimit} µA)`,
+            color: '#fdba74',
+            position: 'insideEndTop',
+          },
+          data: [{ yAxis: datasheetLimit }],
+        },
+      },
+    ],
+  }
+}
+
+function SummaryCard({ title, value, description, icon: Icon, accent }) {
+  return (
+    <Card className="border-slate-800 bg-slate-900/70 ring-slate-800">
+      <CardHeader className="gap-1 pb-0">
+        <div className="flex items-center justify-between">
+          <CardDescription className="text-slate-400">{title}</CardDescription>
+          <div
+            className={`p-1.5 ${accent ?? 'bg-slate-800 text-slate-300'}`}
+          >
+            <Icon className="size-3.5" />
+          </div>
+        </div>
+        <CardTitle className="text-2xl font-semibold tracking-tight text-slate-50">
+          {value}
+        </CardTitle>
+        <p className="text-xs text-slate-500">{description}</p>
+      </CardHeader>
+    </Card>
+  )
+}
+
+function TabButton({ active, onClick, icon: Icon, label, count }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex h-9 items-center gap-2 px-3 text-sm font-medium transition-colors ${
+        active
+          ? 'bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30'
+          : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+      }`}
+    >
+      <Icon className="size-4" />
+      {label}
+      {count != null && (
+        <span className="bg-slate-800 px-1.5 py-0.5 text-xs text-slate-300">
+          {count}
+        </span>
+      )}
+    </button>
+  )
+}
+
+function ComponentRegistry({
+  rows,
+  expandedRowId,
+  onToggleRow,
+}) {
+  if (rows.length === 0) {
+    return (
+      <p className="py-8 text-center text-sm text-slate-500">
+        No component data loaded.
+      </p>
+    )
+  }
+
+  return (
+    <Table>
+      <TableHeader className="sticky top-0 z-10 bg-slate-900">
+        <TableRow className="border-slate-800 hover:bg-transparent">
+          <TableHead className="text-slate-400">ID</TableHead>
+          <TableHead className="text-slate-400">Lot</TableHead>
+          <TableHead className="text-slate-400">0h</TableHead>
+          <TableHead className="text-slate-400">24h</TableHead>
+          <TableHead className="text-slate-400">96h</TableHead>
+          <TableHead className="text-slate-400">168h</TableHead>
+          <TableHead className="text-slate-400">Pred 168h</TableHead>
+          <TableHead className="text-slate-400">Z-Score</TableHead>
+          <TableHead className="text-slate-400">Status</TableHead>
+          <TableHead className="w-10 text-slate-400" />
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((row) => {
+          const rowKey = `${row.ComponentID}-${row.Lot}`
+          const isExpanded = expandedRowId === rowKey
+          const flagged = isFlagged(row)
+
+          return (
+            <Fragment key={rowKey}>
+              <TableRow
+                onClick={() => onToggleRow(rowKey)}
+                className={`cursor-pointer border-slate-800 ${
+                  flagged
+                    ? 'bg-red-500/5 hover:bg-red-500/10'
+                    : 'hover:bg-slate-800/50'
+                } ${isExpanded ? 'bg-slate-800/60' : ''}`}
+              >
+                <TableCell className="font-medium text-slate-200">
+                  {row.ComponentID}
+                </TableCell>
+                <TableCell className="text-slate-300">{row.Lot}</TableCell>
+                <TableCell className="text-slate-300">
+                  {formatMicroamps(row.Value_0h)}
+                </TableCell>
+                <TableCell className="text-slate-300">
+                  {formatMicroamps(row.Value_24h)}
+                </TableCell>
+                <TableCell className="text-slate-300">
+                  {formatMicroamps(row.Value_96h)}
+                </TableCell>
+                <TableCell className="text-slate-300">
+                  {formatMicroamps(row.Value_168h)}
+                </TableCell>
+                <TableCell className="text-slate-300">
+                  {formatMicroamps(row.predicted_168h)}
+                </TableCell>
+                <TableCell className="text-slate-300">
+                  {formatZScore(row.robust_z_score)}
+                </TableCell>
+                <TableCell>{getStatusBadge(row)}</TableCell>
+                <TableCell onClick={(e) => e.stopPropagation()}>
+                  <JustificationPopover justification={row.justification} />
+                </TableCell>
+              </TableRow>
+              {isExpanded && (
+                <TableRow className="border-slate-800 bg-slate-950/80 hover:bg-slate-950/80">
+                  <TableCell colSpan={10} className="py-4">
+                    <div className="border border-amber-500/20 bg-amber-500/5 p-4">
+                      <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-300">
+                        Explainability — {row.ComponentID}
+                      </p>
+                      <p className="text-sm leading-relaxed text-slate-300">
+                        {row.justification}
+                      </p>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              )}
+            </Fragment>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
+}
+
+function JustificationPopover({ justification }) {
+  return (
+    <div className="group relative inline-flex">
+      <button
+        type="button"
+        className="p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+        aria-label="View model justification"
+      >
+        <Info className="size-4" />
+      </button>
+      <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 hidden w-72 -translate-x-1/2 border border-slate-700 bg-slate-900 p-3 text-xs leading-relaxed text-slate-200 shadow-xl group-hover:block group-focus-within:block">
+        <p className="mb-1 font-medium text-amber-300">Model Justification</p>
+        <p>{justification}</p>
+      </div>
+    </div>
+  )
+}
+
+export default function App() {
+  const fileInputRef = useRef(null)
+  const [results, setResults] = useState(null)
+  const [lotFilter, setLotFilter] = useState('all')
+  const [datasheetLimit, setDatasheetLimit] = useState(50)
+  const [activeTab, setActiveTab] = useState('visualizer')
+  const [expandedRowId, setExpandedRowId] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [fileName, setFileName] = useState(null)
+
+  const filteredRows = useMemo(() => {
+    if (!results?.data) return []
+    if (lotFilter === 'all') return results.data
+    return results.data.filter((row) => row.Lot === lotFilter)
+  }, [results, lotFilter])
+
+  const lots = useMemo(() => {
+    if (!results?.data) return []
+    return [...new Set(results.data.map((row) => row.Lot))].sort()
+  }, [results])
+
+  const mae = useMemo(() => computeMae(filteredRows), [filteredRows])
+
+  const flaggedInView = useMemo(
+    () => filteredRows.filter(isFlagged).length,
+    [filteredRows],
+  )
+
+  const flaggedRate = useMemo(() => {
+    if (filteredRows.length === 0) return null
+    return (flaggedInView / filteredRows.length) * 100
+  }, [filteredRows.length, flaggedInView])
+
+  const chartOption = useMemo(
+    () => buildChartOption(filteredRows, datasheetLimit),
+    [filteredRows, datasheetLimit],
+  )
+
+  const handleUpload = useCallback(async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setLoading(true)
+    setError(null)
+    setFileName(file.name)
+    setExpandedRowId(null)
+    setLotFilter('all')
+
+    const formData = new FormData()
+    formData.append('file', file)
+
+    try {
+      const { data } = await axios.post(API_URL, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      setResults(parseApiResponse(data))
+    } catch (err) {
+      const message =
+        err.response?.data?.detail ??
+        err.message ??
+        'Failed to analyze CSV. Ensure the API is running on port 8000.'
+      setError(message)
+      setResults(null)
+    } finally {
+      setLoading(false)
+      event.target.value = ''
+    }
+  }, [])
+
+  const toggleRow = useCallback((componentId) => {
+    setExpandedRowId((current) =>
+      current === componentId ? null : componentId,
+    )
+  }, [])
+
+  return (
+    <div className="dark flex h-full flex-col overflow-hidden bg-slate-950 text-slate-100">
+      <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col gap-3 overflow-hidden p-4 md:p-5">
+        {/* Top Bar */}
+        <header className="flex shrink-0 flex-col gap-3 border border-slate-800 bg-slate-900/60 p-3 md:flex-row md:items-end md:justify-between">
+          <div className="min-w-0 space-y-0.5">
+            <div className="flex items-center gap-2 text-amber-400">
+              <Microscope className="size-4" />
+              <span className="text-xs font-semibold uppercase tracking-widest">
+                Burn-In Screening Pipeline
+              </span>
+            </div>
+            <h1 className="text-xl font-semibold tracking-tight text-slate-50 md:text-2xl">
+              AI-Driven Anomaly Detection Dashboard
+            </h1>
+            <p className="hidden max-w-2xl text-sm text-slate-400 lg:block">
+              Module A: dynamic lot-relative outlier detection. Module B:
+              time-series drift prediction from 0h/24h to forecast 168h
+              behavior.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="space-y-1">
+              <label
+                htmlFor="lot-filter"
+                className="text-xs font-medium text-slate-400"
+              >
+                Lot Filter
+              </label>
+              <div className="relative">
+                <select
+                  id="lot-filter"
+                  value={lotFilter}
+                  onChange={(e) => setLotFilter(e.target.value)}
+                  disabled={!results}
+                  className="h-9 min-w-[140px] appearance-none border border-slate-700 bg-slate-900 pr-8 pl-3 text-sm text-slate-200 outline-none focus:border-amber-500/60 focus:ring-2 focus:ring-amber-500/20 disabled:opacity-50"
+                >
+                  <option value="all">All Lots</option>
+                  {lots.map((lot) => (
+                    <option key={lot} value={lot}>
+                      {lot}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute top-1/2 right-2 size-4 -translate-y-1/2 text-slate-500" />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label
+                htmlFor="datasheet-limit"
+                className="text-xs font-medium text-slate-400"
+              >
+                Datasheet Limit (µA)
+              </label>
+              <input
+                id="datasheet-limit"
+                type="number"
+                min={0}
+                step={0.1}
+                value={datasheetLimit}
+                onChange={(e) =>
+                  setDatasheetLimit(Number(e.target.value) || 0)
+                }
+                className="h-9 w-[120px] border border-slate-700 bg-slate-900 px-3 text-sm text-slate-200 outline-none focus:border-amber-500/60 focus:ring-2 focus:ring-amber-500/20"
+              />
+            </div>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={handleUpload}
+            />
+            <Button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loading}
+              className="h-9 bg-amber-500 text-slate-950 hover:bg-amber-400"
+            >
+              {loading ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Upload className="size-4" />
+              )}
+              {loading ? 'Analyzing…' : 'Upload CSV'}
+            </Button>
+          </div>
+        </header>
+
+        {(fileName || error) && (
+          <div className="shrink-0 space-y-2">
+            {fileName && (
+              <p className="text-xs text-slate-500">
+                Last uploaded:{' '}
+                <span className="text-slate-300">{fileName}</span>
+              </p>
+            )}
+            {error && (
+              <div className="flex items-start gap-3 border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                <p>{error}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Summary Cards */}
+        <section className="grid shrink-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <SummaryCard
+            title="Total Components"
+            value={results ? filteredRows.length : '—'}
+            description="Screened parametric burn-in trajectories in current view"
+            icon={Activity}
+            accent="bg-sky-500/15 text-sky-300"
+          />
+          <SummaryCard
+            title="Flagged Rate"
+            value={
+              flaggedRate != null ? `${flaggedRate.toFixed(1)}%` : '—'
+            }
+            description={`${flaggedInView} flagged — monitor false negatives vs. static ${datasheetLimit} µA limit`}
+            icon={AlertTriangle}
+            accent="bg-red-500/15 text-red-300"
+          />
+          <SummaryCard
+            title="Drift Prediction MAE"
+            value={mae != null ? `${mae.toFixed(2)} µA` : '—'}
+            description="Mean absolute error between predicted and actual 168h values (Module B)"
+            icon={Target}
+            accent="bg-amber-500/15 text-amber-300"
+          />
+        </section>
+
+        {/* Tabs */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-slate-800 pb-2">
+          <TabButton
+            active={activeTab === 'visualizer'}
+            onClick={() => setActiveTab('visualizer')}
+            icon={LineChart}
+            label="Trajectory Visualizer"
+          />
+          <TabButton
+            active={activeTab === 'registry'}
+            onClick={() => setActiveTab('registry')}
+            icon={TableProperties}
+            label="Component Registry"
+            count={results ? filteredRows.length : null}
+          />
+        </div>
+
+        {/* Tab Panels */}
+        <main className="min-h-0 flex-1 overflow-hidden">
+          {activeTab === 'visualizer' ? (
+            <Card className="flex h-full flex-col border-slate-800 bg-slate-900/70 ring-slate-800">
+              <CardHeader className="shrink-0 pb-2">
+                <CardTitle className="text-slate-50">
+                  Parametric Trajectory Visualizer
+                </CardTitle>
+                <CardDescription className="text-slate-400">
+                  Faint slate traces for passing components; bold red/amber for
+                  flagged items. Dashed segments show Module B predicted 168h
+                  from the 96h measurement.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="min-h-0 flex-1 pb-4">
+                {!results ? (
+                  <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 border border-dashed border-slate-800 bg-slate-950/50 text-slate-500">
+                    <Upload className="size-8 opacity-40" />
+                    <p className="text-sm">
+                      Upload a burn-in CSV to visualize leakage-current
+                      trajectories
+                    </p>
+                  </div>
+                ) : (
+                  <ReactECharts
+                    option={chartOption}
+                    style={{ height: '100%', width: '100%' }}
+                    notMerge
+                    lazyUpdate
+                  />
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <Card className="flex h-full flex-col border-slate-800 bg-slate-900/70 ring-slate-800">
+              <CardHeader className="shrink-0 pb-2">
+                <CardTitle className="text-slate-50">
+                  Component Registry
+                </CardTitle>
+                <CardDescription className="text-slate-400">
+                  Click a row to expand the model justification. Hover the info
+                  icon for a quick explainability popover.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="min-h-0 flex-1 overflow-hidden pb-4">
+                <div className="h-full overflow-auto border border-slate-800 bg-slate-950/40">
+                  {!results ? (
+                    <p className="py-8 text-center text-sm text-slate-500">
+                      No component data loaded.
+                    </p>
+                  ) : (
+                    <ComponentRegistry
+                      rows={filteredRows}
+                      expandedRowId={expandedRowId}
+                      onToggleRow={toggleRow}
+                    />
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </main>
+      </div>
+    </div>
+  )
+}
