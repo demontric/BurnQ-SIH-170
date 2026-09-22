@@ -27,10 +27,12 @@ def engineer_features(df: pd.DataFrame, include_168h: bool = True) -> pd.DataFra
     df = df.copy()
 
     # --- deltas & pct changes vs baseline ---
+    denom_0 = df["Value_0h"].replace(0, np.nan).fillna(1e-6)
+    denom_96 = df["Value_96h"].replace(0, np.nan).fillna(1e-6)
     df["delta_24"] = df["Value_24h"] - df["Value_0h"]
     df["delta_96"] = df["Value_96h"] - df["Value_24h"]
-    df["pct_change_24"] = df["delta_24"] / df["Value_0h"]
-    df["pct_change_96_from_0"] = (df["Value_96h"] - df["Value_0h"]) / df["Value_0h"]
+    df["pct_change_24"] = df["delta_24"] / denom_0
+    df["pct_change_96_from_0"] = (df["Value_96h"] - df["Value_0h"]) / denom_0
 
     # --- segment growth rates (slope between consecutive checkpoints) ---
     df["growth_rate_0_24"] = df["delta_24"] / 24.0
@@ -51,7 +53,7 @@ def engineer_features(df: pd.DataFrame, include_168h: bool = True) -> pd.DataFra
 
     if include_168h:
         df["delta_168"] = df["Value_168h"] - df["Value_96h"]
-        df["pct_change_168_from_96"] = df["delta_168"] / df["Value_96h"]
+        df["pct_change_168_from_96"] = df["delta_168"] / denom_96
         df["growth_rate_96_168"] = df["delta_168"] / (168.0 - 96.0)
         df["drift_velocity_late"] = df["growth_rate_96_168"]
         df["drift_acceleration_late"] = df["growth_rate_96_168"] - df["growth_rate_24_96"]

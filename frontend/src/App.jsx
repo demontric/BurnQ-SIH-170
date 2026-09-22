@@ -39,11 +39,16 @@ function isFlagged(row) {
   return Boolean(row.is_anomaly || row.safety_slope_exceeded)
 }
 
+function lotKey(value) {
+  if (value == null || value === '') return '—'
+  return String(value).trim()
+}
+
 function normalizeRow(row) {
   return {
     ComponentID:
       row.ComponentID ?? row.component_id ?? row.part_id ?? row.PartID ?? '—',
-    Lot: row.Lot ?? row.lot_id ?? row.lot ?? '—',
+    Lot: lotKey(row.Lot ?? row.lot_id ?? row.lot),
     Value_0h: Number(row.Value_0h ?? row.value_0h ?? 0),
     Value_24h: Number(row.Value_24h ?? row.value_24h ?? 0),
     Value_96h: Number(row.Value_96h ?? row.value_96h ?? 0),
@@ -435,12 +440,15 @@ export default function App() {
   const filteredRows = useMemo(() => {
     if (!results?.data) return []
     if (lotFilter === 'all') return results.data
-    return results.data.filter((row) => row.Lot === lotFilter)
+    const selectedLot = lotKey(lotFilter)
+    return results.data.filter((row) => lotKey(row.Lot) === selectedLot)
   }, [results, lotFilter])
 
   const lots = useMemo(() => {
     if (!results?.data) return []
-    return [...new Set(results.data.map((row) => row.Lot))].sort()
+    return [...new Set(results.data.map((row) => lotKey(row.Lot)))]
+      .filter((lot) => lot && lot !== '—')
+      .sort()
   }, [results])
 
   const mae = useMemo(() => computeMae(filteredRows), [filteredRows])
@@ -531,7 +539,10 @@ export default function App() {
                 <select
                   id="lot-filter"
                   value={lotFilter}
-                  onChange={(e) => setLotFilter(e.target.value)}
+                  onChange={(e) => {
+                    setLotFilter(e.target.value)
+                    setExpandedRowId(null)
+                  }}
                   disabled={!results}
                   className="h-9 min-w-[140px] appearance-none border border-slate-700 bg-slate-900 pr-8 pl-3 text-sm text-slate-200 outline-none focus:border-amber-500/60 focus:ring-2 focus:ring-amber-500/20 disabled:opacity-50"
                 >
@@ -690,8 +701,9 @@ export default function App() {
                   Component Registry
                 </CardTitle>
                 <CardDescription className="text-slate-400">
-                  Click a row to expand the model justification. Hover the info
-                  icon for a quick explainability popover.
+                  {lotFilter === 'all'
+                    ? 'All lots. Click a row to expand the model justification.'
+                    : `Filtered to lot ${lotFilter} — ${filteredRows.length} component${filteredRows.length === 1 ? '' : 's'}.`}
                 </CardDescription>
               </CardHeader>
               <CardContent className="min-h-0 flex-1 overflow-hidden pb-4">
@@ -702,6 +714,7 @@ export default function App() {
                     </p>
                   ) : (
                     <ComponentRegistry
+                      key={lotFilter}
                       rows={filteredRows}
                       expandedRowId={expandedRowId}
                       onToggleRow={toggleRow}

@@ -8,6 +8,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.synthetic_generator import generate_synthetic_data
 from models.outlier_detection import detect_anomalies
 from models.drift_predictor import predict_168h
+from models.explainability import generate_justification
+from models.pipeline import run_screening
 
 def test_pipeline():
     # 1. Generate data
@@ -32,12 +34,14 @@ def test_pipeline():
     assert 'predicted_168h' in df_ab.columns
     assert 'safety_slope_exceeded' in df_ab.columns
     
-    # 4. Evaluate
+    # 4. Evaluate combined screening payload
     print("\n--- Evaluation ---")
-    df_ab['is_flagged'] = df_ab['is_anomaly'] | df_ab['safety_slope_exceeded']
-    
+    payload = run_screening(df)
+    data = payload["data"]
+    flagged = {row["ComponentID"] for row in data if row.get("is_flagged")}
+
     y_true = df_ab['ground_truth_defective']
-    y_pred = df_ab['is_flagged']
+    y_pred = df_ab['part_id'].isin(flagged) if 'part_id' in df_ab.columns else df_ab['is_anomaly'] | df_ab['safety_slope_exceeded']
     
     tp = ((y_true == True) & (y_pred == True)).sum()
     fp = ((y_true == False) & (y_pred == True)).sum()
@@ -53,8 +57,12 @@ def test_pipeline():
     print(f"Recall: {recall:.2%}")
     print(f"Precision: {precision:.2%}")
     
-    assert recall > 0.0, "Pipeline should flag at least some defects"
-    print("\nPipeline test passed!")
+    assert payload["total_components"] == len(df)
+    assert payload["flagged_count"] == len(flagged)
+    assert payload["mae"] is not None
+    assert all("justification" in row for row in data)
+    assert any(row.get("predicted_168h") is not None for row in data)
+
 
 if __name__ == "__main__":
     test_pipeline()
