@@ -97,11 +97,21 @@ def _lot_stats(df: pd.DataFrame, value_col: str):
     return stats
 
 
-def run_screening(df: pd.DataFrame, datasheet_limit=None) -> dict:
+def run_screening(df: pd.DataFrame, datasheet_limit=None, risk_tolerance=50.0) -> dict:
     raw = normalize_input(df, datasheet_limit=datasheet_limit)
 
-    module_a = detect_anomalies(raw)
-    screened = predict_168h(module_a)
+    # Convert risk_tolerance (1-100) to a threshold modifier.
+    # Lower tolerance = more strict (lower Z threshold) = more sensitive to false negatives.
+    # e.g., 50 -> 3.5, 1 -> 2.0, 100 -> 5.0
+    z_threshold = 2.0 + (risk_tolerance / 100.0) * 3.0
+
+    # Gate 1: 24h Early Drift Prediction (Module B)
+    # Predict 168h from 0h/24h features.
+    screened_gate1 = predict_168h(raw, threshold=z_threshold)
+
+    # Gate 2: 96h Late Bloomer Detection (Module A)
+    # Detect time-series anomalies on parts that survive Gate 1 or need further checks.
+    screened = detect_anomalies(screened_gate1, threshold=z_threshold)
 
     lot_stats_168h = _lot_stats(screened, "value_168h")
     justifications = []

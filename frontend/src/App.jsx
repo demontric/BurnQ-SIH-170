@@ -431,6 +431,7 @@ export default function App() {
   const [results, setResults] = useState(null)
   const [lotFilter, setLotFilter] = useState('all')
   const [datasheetLimit, setDatasheetLimit] = useState(50)
+  const [riskTolerance, setRiskTolerance] = useState(50)
   const [activeTab, setActiveTab] = useState('visualizer')
   const [expandedRowId, setExpandedRowId] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -480,6 +481,8 @@ export default function App() {
 
     const formData = new FormData()
     formData.append('file', file)
+    formData.append('risk_tolerance', riskTolerance)
+    formData.append('datasheet_limit', datasheetLimit)
 
     try {
       const { data } = await axios.post(API_URL, formData, {
@@ -575,6 +578,28 @@ export default function App() {
                 }
                 className="h-9 w-[120px] border border-slate-700 bg-slate-900 px-3 text-sm text-slate-200 outline-none focus:border-amber-500/60 focus:ring-2 focus:ring-amber-500/20"
               />
+            </div>
+
+            <div className="space-y-1">
+              <label
+                htmlFor="risk-tolerance"
+                className="text-xs font-medium text-slate-400"
+              >
+                Risk Tolerance (Cost Sensitivity)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="risk-tolerance"
+                  type="range"
+                  min={1}
+                  max={100}
+                  value={riskTolerance}
+                  onChange={(e) => setRiskTolerance(Number(e.target.value))}
+                  className="h-9 w-[120px] accent-amber-500"
+                  title="Lower tolerance penalizes false negatives more"
+                />
+                <span className="text-xs text-slate-400">{riskTolerance}</span>
+              </div>
             </div>
 
             <input

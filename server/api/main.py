@@ -31,8 +31,16 @@ app.add_middleware(
 def read_root():
     return {"status": "ok", "message": "Burn-In Anomaly Detector API is running."}
 
+from fastapi import Form
+from models.pipeline import run_screening
+
+@app.post("/api/detect-anomaly")
 @app.post("/detect-anomaly")
-async def detect_anomaly_endpoint(file: UploadFile = File(...)):
+async def detect_anomaly_endpoint(
+    file: UploadFile = File(...),
+    risk_tolerance: float = Form(50.0),
+    datasheet_limit: float = Form(50.0)
+):
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
     
@@ -40,17 +48,10 @@ async def detect_anomaly_endpoint(file: UploadFile = File(...)):
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
         
-        # Validate columns
-        req_cols = ['lot_id', 'parameter', 'value_0h', 'value_24h', 'value_96h', 'value_168h']
-        missing = [c for c in req_cols if c not in df.columns]
-        if missing:
-             raise ValueError(f"Missing required columns: {missing}")
+        # Run full screening pipeline
+        result = run_screening(df, datasheet_limit=datasheet_limit, risk_tolerance=risk_tolerance)
         
-        # Run module A
-        result_df = detect_anomalies(df)
-        
-        # Return as JSON records
-        return JSONResponse(content=result_df.to_dict(orient="records"))
+        return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

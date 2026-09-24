@@ -18,7 +18,7 @@ def _session():
     return _SESSION
 
 
-def predict_168h(df):
+def predict_168h(df, threshold=3.5):
     """
     Module B — forecast Value_168h from early burn-in history and flag
     parts whose predicted drift rate exceeds a lot-calculated safety slope.
@@ -37,7 +37,18 @@ def predict_168h(df):
         feat_df["datasheet_limit_uA"] = 50.0
 
     feat = engineer_features(feat_df, include_168h=False)
+    
+    # To prevent 96h data leakage in Module B (Gate 1), we zero out any feature 
+    # that relies on 96h data. The ONNX model expects 15 features, so we keep the structure.
     X_drift = feat[DRIFT_MODEL_FEATURES].to_numpy(dtype=np.float32, copy=True)
+    
+    # Indices of 96h features in DRIFT_MODEL_FEATURES:
+    # 2: Value_96h, 4: delta_96, 6: pct_change_96_from_0, 8: growth_rate_24_96,
+    # 9: drift_velocity_early, 10: drift_acceleration_early, 14: margin_ratio_96h
+    leakage_indices = [2, 4, 6, 8, 9, 10, 14]
+    for idx in leakage_indices:
+        X_drift[:, idx] = 0.0
+
     X_drift = np.nan_to_num(X_drift, nan=0.0, posinf=0.0, neginf=0.0)
 
     preds = _session().run(None, {"input": X_drift})[0]
@@ -61,12 +72,15 @@ def predict_168h(df):
     for _, group in groups:
         idx = group.index
         rates = group["predicted_drift_rate"].astype(float)
-        median = rates.median()
-        mad = np.median(np.abs(rates - median))
-        if mad == 0:
-            mad = 1e-6
+        
+        # Calculate dynamic, rolling baseline to avoid lot-level data leakage
+        rolling_median = rates.expanding(min_periods=1).median()
+        # For MAD, expanding apply is slow, so we approximate with expanding std * 0.6745
+        rolling_mad = rates.expanding(min_periods=1).std().fillna(1e-6) * 0.6745
+        rolling_mad = np.maximum(rolling_mad, 1e-6)
+        
         # Lot safety slope: robust upper bound on predicted µA/hour
-        safety_slope = median + ROBUST_Z_THRESHOLD * (mad / 0.6745)
+        safety_slope = rolling_median + threshold * (rolling_mad / 0.6745)
         out_df.loc[idx, "safety_slope"] = safety_slope
 
         exceeds_lot_slope = rates > safety_slope

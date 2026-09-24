@@ -32,6 +32,7 @@ def detect_anomalies(
     lot_col="lot_id",
     param_col="parameter",
     value_cols=None,
+    threshold=3.5
 ):
     """
     Module A — lot-relative dynamic outlier detection.
@@ -80,16 +81,24 @@ def detect_anomalies(
     time_cols = [c for c in value_cols if c in out_df.columns]
     primary = "value_168h" if "value_168h" in out_df.columns else time_cols[-1]
 
+    def _expanding_robust_z(series):
+        vals = series.astype(float)
+        # Use expanding median and approx MAD for rolling baseline
+        rolling_median = vals.expanding(min_periods=1).median()
+        rolling_mad = vals.expanding(min_periods=1).std().fillna(1e-6) * 0.6745
+        rolling_mad = np.maximum(rolling_mad, 1e-6)
+        return 0.6745 * (vals - rolling_median) / rolling_mad
+
     for _, group in out_df.groupby([lot_col, param_col]):
         idx = group.index
-        z_primary = _robust_z(group[primary])
+        z_primary = _expanding_robust_z(group[primary])
         out_df.loc[idx, "robust_z_score"] = z_primary
         z_max = np.abs(z_primary.to_numpy())
         for col in time_cols:
             if col == primary:
                 continue
-            z_max = np.maximum(z_max, np.abs(_robust_z(group[col]).to_numpy()))
-        out_df.loc[idx, "is_lot_outlier"] = z_max > ROBUST_Z_THRESHOLD
+            z_max = np.maximum(z_max, np.abs(_expanding_robust_z(group[col]).to_numpy()))
+        out_df.loc[idx, "is_lot_outlier"] = z_max > threshold
 
     exceeds_static = False
     if "datasheet_limit" in out_df.columns and primary in out_df.columns:

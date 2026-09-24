@@ -20,20 +20,28 @@ This is a prototype web app for detecting latent defects during burn-in stress t
    python tests/test_pipeline.py
    ```
 
-## Running the Dashboard
+## Running the Dashboard (Primary Demo UI)
 
-Launch the Streamlit single-page app:
+We recommend using the polished React/Vite frontend for the primary QA inspector demo:
+1. Start the API backend:
 ```bash
+python server/api/main.py
+```
+2. In a separate terminal, start the React frontend:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173` in your browser.
+
+## Backend Evaluation (Debugging Only)
+
+The legacy Streamlit dashboard is maintained strictly for backend model evaluation and debugging. Do not use this for the primary presentation.
+```bash
+cd server
 streamlit run dashboard/app.py
 ```
-
-## Running the API (Optional)
-
-The backend features FastAPI endpoints for remote inference:
-```bash
-python api/main.py
-```
-Test with: `curl -X POST -F "file=@data/synthetic_burnin_data.csv" http://localhost:8000/detect-anomaly`
 
 ## Architecture
 
