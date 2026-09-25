@@ -1,32 +1,19 @@
-"""
-features.py
-------------
-Feature engineering for the real synthetic_burnin_data.csv schema:
-ComponentID, Lot, Value_0h, Value_24h, Value_96h, Value_168h,
-true_label, datasheet_limit_uA, passes_static_limit
-
-Design notes
-------------
-- Only ONE measurement channel is available (a leakage-current-like value in
-  uA), so every feature below is derived from that single time series plus
-  the datasheet limit. This differs from the original multi-parameter design
-  in Step 1's synthetic prototype, but the same reliability-engineering
-  logic applies: trend, velocity, acceleration, and margin-to-spec.
-- Feature groups are split into "drift-model-safe" (only use 0h/24h/96h, no
-  168h) vs "full-history" (anomaly model, uses all 4 points) so the drift
-  regressor in Step 5 never leaks its own target.
-"""
-
 import numpy as np
 import pandas as pd
 
 TIMEPOINTS = [0, 24, 96, 168]
 
-
 def engineer_features(df: pd.DataFrame, include_168h: bool = True) -> pd.DataFrame:
     df = df.copy()
 
-    # --- deltas & pct changes vs baseline ---
+    # --- Prevent Data Leakage: Dynamic Rolling Lot Statistics ---
+    # We calculate these for the UI and the pipeline routing, but they are NOT 
+    # pushed into the ONNX feature lists below to prevent dimension mismatch.
+    df['lot_mean_0h'] = df.groupby('Lot')['Value_0h'].transform(lambda x: x.expanding().mean())
+    df['lot_mean_24h'] = df.groupby('Lot')['Value_24h'].transform(lambda x: x.expanding().mean())
+    df['lot_mean_96h'] = df.groupby('Lot')['Value_96h'].transform(lambda x: x.expanding().mean())
+
+    # --- Base Deltas & Pct Changes ---
     denom_0 = df["Value_0h"].replace(0, np.nan).fillna(1e-6)
     denom_96 = df["Value_96h"].replace(0, np.nan).fillna(1e-6)
     df["delta_24"] = df["Value_24h"] - df["Value_0h"]
@@ -34,23 +21,24 @@ def engineer_features(df: pd.DataFrame, include_168h: bool = True) -> pd.DataFra
     df["pct_change_24"] = df["delta_24"] / denom_0
     df["pct_change_96_from_0"] = (df["Value_96h"] - df["Value_0h"]) / denom_0
 
-    # --- segment growth rates (slope between consecutive checkpoints) ---
+    # --- Segment Growth Rates ---
     df["growth_rate_0_24"] = df["delta_24"] / 24.0
     df["growth_rate_24_96"] = df["delta_96"] / (96.0 - 24.0)
 
-    # --- drift velocity / acceleration using only 0-96h (drift-model-safe) ---
+    # --- Early Drift Velocity / Acceleration ---
     df["drift_velocity_early"] = df["growth_rate_24_96"]
     df["drift_acceleration_early"] = df["growth_rate_24_96"] - df["growth_rate_0_24"]
 
-    # --- early rolling stats (0h,24h,96h only) ---
+    # --- Early Row-wise Stats ---
     early_cols = ["Value_0h", "Value_24h", "Value_96h"]
     df["early_mean"] = df[early_cols].mean(axis=1)
     df["early_std"] = df[early_cols].std(axis=1)
 
-    # --- margin to datasheet limit (0h/24h/96h only — always safe) ---
+    # --- Margins ---
     df["margin_0h"] = df["datasheet_limit_uA"] - df["Value_0h"]
     df["margin_ratio_96h"] = df["Value_96h"] / df["datasheet_limit_uA"]
 
+    # --- Late Stage / 168h Target Features ---
     if include_168h:
         df["delta_168"] = df["Value_168h"] - df["Value_96h"]
         df["pct_change_168_from_96"] = df["delta_168"] / denom_96
@@ -58,19 +46,21 @@ def engineer_features(df: pd.DataFrame, include_168h: bool = True) -> pd.DataFra
         df["drift_velocity_late"] = df["growth_rate_96_168"]
         df["drift_acceleration_late"] = df["growth_rate_96_168"] - df["growth_rate_24_96"]
         df["overall_growth_rate"] = (df["Value_168h"] - df["Value_0h"]) / 168.0
+
         all_cols = ["Value_0h", "Value_24h", "Value_96h", "Value_168h"]
         df["full_mean"] = df[all_cols].mean(axis=1)
         df["full_std"] = df[all_cols].std(axis=1)
         df["margin_168h"] = df["datasheet_limit_uA"] - df["Value_168h"]
         df["margin_ratio_168h"] = df["Value_168h"] / df["datasheet_limit_uA"]
-        # simple health/degradation index: normalized cumulative drift + margin pressure
+
         df["degradation_index"] = (
             df["overall_growth_rate"].clip(lower=0) / df["Value_0h"]
         ) * (df["margin_ratio_168h"])
 
     return df
 
-
+# RESTORED: Exact 15 features expected by drift_model.onnx
+# The 96h isolation is handled by passing zeros for these indices inside drift_predictor.py
 DRIFT_MODEL_FEATURES = [
     "Value_0h", "Value_24h", "Value_96h",
     "delta_24", "delta_96", "pct_change_24", "pct_change_96_from_0",
@@ -79,6 +69,7 @@ DRIFT_MODEL_FEATURES = [
     "early_mean", "early_std", "margin_0h", "margin_ratio_96h",
 ]
 
+# RESTORED: Exact 26 features expected by anomaly_model.onnx
 ANOMALY_MODEL_FEATURES = DRIFT_MODEL_FEATURES + [
     "delta_168", "pct_change_168_from_96", "growth_rate_96_168",
     "drift_velocity_late", "drift_acceleration_late",

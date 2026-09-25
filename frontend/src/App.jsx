@@ -314,12 +314,38 @@ function TabButton({ active, onClick, icon: Icon, label, count }) {
   )
 }
 
+// Bouncing Dots Component for LLM generation loading state
+function BouncingDots() {
+  return (
+    <div className="flex items-center justify-center space-x-2">
+      <div className="size-2.5 rounded-full bg-amber-500 animate-bounce [animation-delay:-0.3s]"></div>
+      <div className="size-2.5 rounded-full bg-amber-500 animate-bounce [animation-delay:-0.15s]"></div>
+      <div className="size-2.5 rounded-full bg-amber-500 animate-bounce"></div>
+    </div>
+  )
+}
+
 function ComponentRegistry({
   rows,
   expandedRowId,
   onToggleRow,
+  loading,
+  hasResults,
+  explanations,
+  rowLoading,
 }) {
-  if (rows.length === 0) {
+  if (loading) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 py-20">
+        <BouncingDots />
+        <p className="text-sm font-medium text-amber-500/80 animate-pulse">
+          Generating LLM explanations & running anomaly models...
+        </p>
+      </div>
+    )
+  }
+
+  if (!hasResults || rows.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-slate-500">
         No component data loaded.
@@ -344,15 +370,15 @@ function ComponentRegistry({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.map((row) => {
-          const rowKey = `${row.ComponentID}-${row.Lot}`
+        {rows.map((row, index) => {
+          const rowKey = `${row.ComponentID}-${row.Lot}-${index}`
           const isExpanded = expandedRowId === rowKey
           const flagged = isFlagged(row)
 
           return (
             <Fragment key={rowKey}>
               <TableRow
-                onClick={() => onToggleRow(rowKey)}
+                onClick={() => onToggleRow(rowKey, row)}
                 className={`cursor-pointer border-slate-800 ${
                   flagged
                     ? 'bg-red-500/5 hover:bg-red-500/10'
@@ -390,12 +416,22 @@ function ComponentRegistry({
                 <TableRow className="border-slate-800 bg-slate-950/80 hover:bg-slate-950/80">
                   <TableCell colSpan={10} className="py-4">
                     <div className="border border-amber-500/20 bg-amber-500/5 p-4">
-                      <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-300">
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-300">
                         Explainability — {row.ComponentID}
                       </p>
-                      <p className="text-sm leading-relaxed text-slate-300">
-                        {row.justification}
-                      </p>
+
+                      {rowLoading[rowKey] ? (
+                        <div className="flex items-center gap-3 py-2">
+                          <BouncingDots />
+                          <span className="text-sm text-amber-500/80">
+                            Analyzing component trajectory...
+                          </span>
+                        </div>
+                      ) : (
+                        <p className="text-sm leading-relaxed text-slate-300">
+                          {explanations[rowKey] || 'No justification available.'}
+                        </p>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -437,6 +473,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [fileName, setFileName] = useState(null)
+  const [explanations, setExplanations] = useState({})
+  const [rowLoading, setRowLoading] = useState({})
 
   const filteredRows = useMemo(() => {
     if (!results?.data) return []
@@ -478,6 +516,9 @@ export default function App() {
     setFileName(file.name)
     setExpandedRowId(null)
     setLotFilter('all')
+    setResults(null) // Clear old results instantly while loading
+    setExplanations({}) // Cached explanations are keyed by row, so drop them on new data
+    setRowLoading({})
 
     const formData = new FormData()
     formData.append('file', file)
@@ -500,13 +541,34 @@ export default function App() {
       setLoading(false)
       event.target.value = ''
     }
-  }, [])
+  }, [riskTolerance, datasheetLimit])
 
-  const toggleRow = useCallback((componentId) => {
-    setExpandedRowId((current) =>
-      current === componentId ? null : componentId,
-    )
-  }, [])
+  const toggleRow = useCallback(async (rowKey, rowData) => {
+    setExpandedRowId((current) => (current === rowKey ? null : rowKey))
+
+    // If we already have the explanation, don't fetch it again
+    if (explanations[rowKey] || !rowData) return
+
+    setRowLoading((prev) => ({ ...prev, [rowKey]: true }))
+
+    try {
+      const response = await axios.post(
+        'http://127.0.0.1:8000/api/explain',
+        rowData,
+      )
+      setExplanations((prev) => ({
+        ...prev,
+        [rowKey]: response.data.justification,
+      }))
+    } catch (err) {
+      setExplanations((prev) => ({
+        ...prev,
+        [rowKey]: 'Error generating explanation.',
+      }))
+    } finally {
+      setRowLoading((prev) => ({ ...prev, [rowKey]: false }))
+    }
+  }, [explanations])
 
   return (
     <div className="dark flex h-full flex-col overflow-hidden bg-slate-950 text-slate-100">
@@ -701,7 +763,14 @@ export default function App() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="min-h-0 flex-1 pb-4">
-                {!results ? (
+                {loading ? (
+                  <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-4 border border-dashed border-slate-800 bg-slate-950/50">
+                    <BouncingDots />
+                    <p className="text-sm font-medium text-amber-500/80 animate-pulse">
+                      Generating LLM explanations & running anomaly models...
+                    </p>
+                  </div>
+                ) : !results ? (
                   <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 border border-dashed border-slate-800 bg-slate-950/50 text-slate-500">
                     <Upload className="size-8 opacity-40" />
                     <p className="text-sm">
@@ -733,18 +802,16 @@ export default function App() {
               </CardHeader>
               <CardContent className="min-h-0 flex-1 overflow-hidden pb-4">
                 <div className="h-full overflow-auto border border-slate-800 bg-slate-950/40">
-                  {!results ? (
-                    <p className="py-8 text-center text-sm text-slate-500">
-                      No component data loaded.
-                    </p>
-                  ) : (
-                    <ComponentRegistry
-                      key={lotFilter}
-                      rows={filteredRows}
-                      expandedRowId={expandedRowId}
-                      onToggleRow={toggleRow}
-                    />
-                  )}
+                  <ComponentRegistry
+                    key={lotFilter}
+                    rows={filteredRows}
+                    expandedRowId={expandedRowId}
+                    onToggleRow={toggleRow}
+                    loading={loading}
+                    hasResults={!!results}
+                    explanations={explanations}
+                    rowLoading={rowLoading}
+                  />
                 </div>
               </CardContent>
             </Card>

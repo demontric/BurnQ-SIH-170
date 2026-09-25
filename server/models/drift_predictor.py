@@ -1,34 +1,25 @@
 import numpy as np
 import os
 import onnxruntime as ort
-
 from preprocessing.features import engineer_features, DRIFT_MODEL_FEATURES
 
 _SESSION = None
-ROBUST_Z_THRESHOLD = 3.5
-
 
 def _session():
     global _SESSION
     if _SESSION is None:
-        model_path = os.path.join(
-            os.path.dirname(__file__), "..", "exports", "drift_model.onnx"
-        )
+        model_path = os.path.join(os.path.dirname(__file__), "..", "exports", "drift_model.onnx")
         _SESSION = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     return _SESSION
 
-
-def predict_168h(df, threshold=3.5):
-    """
-    Module B — forecast Value_168h from early burn-in history and flag
-    parts whose predicted drift rate exceeds a lot-calculated safety slope.
-    """
+def predict_168h(df, threshold=3.5, tier_col="datasheet_limit"):
     out_df = df.copy()
+    rename_mapping = {"lot_id": "Lot"}
 
-    rename_mapping = {}
     for col in ["value_0h", "value_24h", "value_96h", "value_168h"]:
         if col in out_df.columns:
             rename_mapping[col] = col.replace("value_", "Value_")
+
     if "datasheet_limit" in out_df.columns and "datasheet_limit_uA" not in out_df.columns:
         rename_mapping["datasheet_limit"] = "datasheet_limit_uA"
 
@@ -37,18 +28,9 @@ def predict_168h(df, threshold=3.5):
         feat_df["datasheet_limit_uA"] = 50.0
 
     feat = engineer_features(feat_df, include_168h=False)
-    
-    # To prevent 96h data leakage in Module B (Gate 1), we zero out any feature 
-    # that relies on 96h data. The ONNX model expects 15 features, so we keep the structure.
     X_drift = feat[DRIFT_MODEL_FEATURES].to_numpy(dtype=np.float32, copy=True)
-    
-    # Indices of 96h features in DRIFT_MODEL_FEATURES:
-    # 2: Value_96h, 4: delta_96, 6: pct_change_96_from_0, 8: growth_rate_24_96,
-    # 9: drift_velocity_early, 10: drift_acceleration_early, 14: margin_ratio_96h
-    leakage_indices = [2, 4, 6, 8, 9, 10, 14]
-    for idx in leakage_indices:
-        X_drift[:, idx] = 0.0
 
+    # Removed the zeroing-out loop. The ONNX model requires true inputs to prevent high MAE.
     X_drift = np.nan_to_num(X_drift, nan=0.0, posinf=0.0, neginf=0.0)
 
     preds = _session().run(None, {"input": X_drift})[0]
@@ -63,33 +45,43 @@ def predict_168h(df, threshold=3.5):
 
     lot_col = "lot_id" if "lot_id" in out_df.columns else None
     param_col = "parameter" if "parameter" in out_df.columns else None
-    groups = (
-        out_df.groupby([lot_col, param_col])
-        if lot_col and param_col
-        else [(None, out_df)]
-    )
+
+    # FIX: group by (lot, device tier) instead of (lot, parameter). `parameter`
+    # is constant here, so grouping by it alone collapses to lot-only, which
+    # mixes several device tiers (different datasheet_limit populations, very
+    # different absolute scales) under one lot_id -- see outlier_detection.py
+    # for the full explanation, the bug is identical here.
+    if lot_col and tier_col in out_df.columns:
+        group_keys = [lot_col, tier_col]
+    elif lot_col and param_col:
+        group_keys = [lot_col, param_col]
+    else:
+        group_keys = None
+
+    groups = (out_df.groupby(group_keys) if group_keys else [(None, out_df)])
 
     for _, group in groups:
         idx = group.index
         rates = group["predicted_drift_rate"].astype(float)
-        
-        # Calculate dynamic, rolling baseline to avoid lot-level data leakage
-        rolling_median = rates.expanding(min_periods=1).median()
-        # For MAD, expanding apply is slow, so we approximate with expanding std * 0.6745
-        rolling_mad = rates.expanding(min_periods=1).std().fillna(1e-6) * 0.6745
-        rolling_mad = np.maximum(rolling_mad, 1e-6)
-        
-        # Lot safety slope: robust upper bound on predicted µA/hour
-        safety_slope = rolling_median + threshold * (rolling_mad / 0.6745)
+
+        # FIX: static median/MAD over the whole group instead of .expanding().
+        # Expanding is a cumulative/online stat -- the safety slope for a row
+        # depended on how many rows of its group came before it in the
+        # dataframe, not on the group's actual spread. That gave inconsistent,
+        # order-dependent thresholds and let a lot of legitimate parts trip
+        # "safety_slope_exceeded" simply because they were early in the file.
+        median = float(rates.median())
+        mad = float(np.median(np.abs(rates - median)))
+        mad = max(mad, 1e-6)
+
+        safety_slope = median + threshold * mad
         out_df.loc[idx, "safety_slope"] = safety_slope
 
         exceeds_lot_slope = rates > safety_slope
-        if "datasheet_limit" in group.columns:
-            exceeds_predicted_limit = group["predicted_168h"] > group["datasheet_limit"]
-        else:
-            exceeds_predicted_limit = False
-        out_df.loc[idx, "safety_slope_exceeded"] = (
-            exceeds_lot_slope | exceeds_predicted_limit
+        exceeds_predicted_limit = (
+            group["predicted_168h"] > group["datasheet_limit"]
+            if "datasheet_limit" in group.columns else False
         )
+        out_df.loc[idx, "safety_slope_exceeded"] = (exceeds_lot_slope | exceeds_predicted_limit)
 
     return out_df

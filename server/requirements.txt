@@ -13,3 +13,5 @@ python-multipart
 pytest
 flatbuffers==25.12.19
 onnxruntime==1.30.0
+google-genai
+python-dotenv

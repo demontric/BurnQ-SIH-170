@@ -1,55 +1,71 @@
-import pandas as pd
+import logging
+import os
+
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+logger = logging.getLogger(__name__)
+
+# Initialize the modern Gemini client
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+MODEL_ID = "gemini-3.5-flash-lite"
+
+# No tools are declared for this call, but explicitly disabling automatic
+# function calling stops the SDK from evaluating/logging the AFC path.
+GENERATION_CONFIG = types.GenerateContentConfig(
+    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+)
 
 
-def generate_justification(row: pd.Series, median_168h: float, mad_168h: float) -> str:
-    """Human-readable reasons a QA inspector can verify against lot stats."""
-    reasons = []
-    parameter = row.get("parameter", "parameter")
-    val_168 = row.get("value_168h")
-    z = row.get("robust_z_score")
-    predicted = row.get("predicted_168h")
-    limit = row.get("datasheet_limit")
-    v0 = row.get("value_0h")
-    v24 = row.get("value_24h")
-
-    if z is not None and not pd.isna(z) and abs(z) > 3.5:
-        val_txt = f"{float(val_168):.2f} µA" if val_168 is not None and not pd.isna(val_168) else "n/a"
-        reasons.append(
-            f"The value ({val_txt}) is {abs(float(z)):.1f}x the lot median ({median_168h:.2f} µA)."
-        )
-
-    if row.get("is_if_anomaly") or (
-        row.get("is_anomaly") and (z is None or pd.isna(z) or abs(z) <= 3.5)
-    ):
-        reasons.append(
-            "The multivariate burn-in path exhibits a sudden non-linear drift compared to peers."
-        )
-
-    if limit is not None and not pd.isna(limit) and val_168 is not None and not pd.isna(val_168):
-        if float(val_168) > float(limit):
-            reasons.append(
-                f"The 168h value ({float(val_168):.2f} µA) exceeds the static datasheet limit ({float(limit):.1f} µA)."
-            )
-
-    if row.get("safety_slope_exceeded"):
-        rate = row.get("predicted_drift_rate")
-        slope = row.get("safety_slope")
-        pred_txt = (
-            f"{float(predicted):.2f} µA"
-            if predicted is not None and not pd.isna(predicted)
-            else "n/a"
-        )
-        rate_txt = f"{float(rate):.4f} µA/h" if rate is not None and not pd.isna(rate) else "n/a"
-        slope_txt = (
-            f"{float(slope):.4f} µA/h" if slope is not None and not pd.isna(slope) else "n/a"
-        )
-        reasons.append(
-            f"The 24h drift rate ({rate_txt}) is higher than the {row.get('lot_id', 'lot')} historical average ({slope_txt}), resulting in a projected 168h failure."
-        )
-
-    if not reasons:
-        if row.get("is_anomaly") or row.get("safety_slope_exceeded"):
-            return "Flagged for Rejection: Abnormal drift or statistical deviation."
+def generate_single_justification(data: dict) -> str:
+    """On-demand NLG generation for a single component using the modern genai SDK."""
+    if not data.get("is_anomaly") and not data.get("safety_slope_exceeded"):
         return "Pass: Trajectory is consistent with the lot."
 
-    return "Flagged for Rejection: " + " ".join(reasons)
+    prompt = f"""
+    You are a factory floor QA system. Write a single, professional sentence explaining why this component failed based on the following burn-in test data. 
+    
+    Data Context:
+    - Component Lot: {data.get("Lot")}
+    - 168h Value: {data.get("Value_168h")} µA 
+    - Robust Z-Score: {data.get("robust_z_score")}
+    - 24h Predicted Drift Rate: {data.get("predicted_drift_rate")} µA/h
+    - Dynamic Safety Slope Limit: {data.get("safety_slope")} µA/h
+    - Absolute Datasheet Limit: {data.get("datasheet_limit")} µA
+    - Isolation Forest Trajectory Anomaly: {data.get("is_if_anomaly", False)}
+    - Overall Anomaly Flag: {data.get("is_anomaly")}
+    - Safety Slope Exceeded Flag: {data.get("safety_slope_exceeded")}
+
+    Rules:
+    1. You MUST begin the sentence with "Flagged for Rejection: "
+    2. Use the specific numeric values provided to justify the decision in plain English.
+    3. Do not use markdown formatting. Keep it to exactly one sentence.
+    """
+
+    try:
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=prompt,
+            config=GENERATION_CONFIG,
+        )
+        return response.text.strip()
+    except Exception:
+        # Log the real failure (bad key, rate limit, network error, etc.)
+        # instead of silently masking it behind the fallback sentence below.
+        logger.exception(
+            "Gemini justification generation failed for component %r",
+            data.get("part_id") or data.get("ComponentID"),
+        )
+        return "Flagged for Rejection: Abnormal drift or statistical deviation detected in trajectory."
+
+
+# Backward compatibility alias to prevent import errors across legacy modules
+def generate_justification(row, median_168h=0.0, mad_168h=0.0):
+    if hasattr(row, "to_dict"):
+        d = row.to_dict()
+    else:
+        d = dict(row)
+    return generate_single_justification(d)
