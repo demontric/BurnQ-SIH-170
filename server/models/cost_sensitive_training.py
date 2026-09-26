@@ -16,10 +16,22 @@ def asymmetric_mse_objective(preds, dtrain):
     
     # Apply penalty to gradient to force massive correction steps in the trees
     grad = penalty * res
-    
-    # Leave Hessian unscaled by the penalty. 
-    # If both are scaled, the penalty cancels out in XGBoost's leaf weight formula.
-    hess = np.ones_like(res)
+
+    # FIX: the Hessian must be scaled by the same penalty as the gradient.
+    # XGBoost's leaf weight update is -sum(grad)/sum(hess) (plus regularization).
+    # With hess left at 1.0, an under-prediction (penalty=100) produces a
+    # gradient 100x larger while the Hessian denominator stays 1x, so the
+    # leaf's correction step is ~100x too large relative to what the
+    # asymmetric loss actually calls for. Scaling hess by the same penalty
+    # keeps the gradient/Hessian *ratio* (i.e. the effective step size) at
+    # the same relative scale as an ordinary MSE step, and only the total
+    # weight given to that residual in the sum is inflated -- which is the
+    # intended cost-sensitivity, not a runaway step size.
+    # (The old comment's claim that scaling both "cancels the penalty out"
+    # is incorrect: leaf weight is grad_sum/hess_sum, and scaling numerator
+    # and denominator by the same per-sample penalty changes the *weighted
+    # average* residual that sum represents -- it does not cancel to 1.)
+    hess = penalty * np.ones_like(res)
     
     return grad, hess
 
