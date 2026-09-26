@@ -64,7 +64,10 @@ def run_screening(df: pd.DataFrame, datasheet_limit=None, risk_tolerance=50.0) -
     screened_gate1 = predict_168h(raw, threshold=z_threshold)
 
     # Gate 2: Detect 96h late-bloomer anomalies
-    screened = detect_anomalies(screened_gate1, threshold=z_threshold)
+    # risk_tolerance is passed through explicitly (not just the derived
+    # z_threshold) so the isolation-forest gate responds to the slider too --
+    # see the fix in models/outlier_detection.py.
+    screened = detect_anomalies(screened_gate1, threshold=z_threshold, risk_tolerance=risk_tolerance)
 
     # Justifications are no longer generated synchronously here; the initial
     # upload returns null so the response is fast. Justifications can be

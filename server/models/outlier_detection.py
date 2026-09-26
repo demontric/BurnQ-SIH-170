@@ -2,6 +2,7 @@ import numpy as np
 import os
 import onnxruntime as ort
 from preprocessing.features import engineer_features, ANOMALY_MODEL_FEATURES
+from models.cost_sensitive_training import cost_sensitive_isolation_forest_threshold
 
 _SESSION = None
 
@@ -30,7 +31,8 @@ def detect_anomalies(
     param_col="parameter",
     tier_col="datasheet_limit",
     value_cols=None,
-    threshold=3.5
+    threshold=3.5,
+    risk_tolerance=50.0
 ):
     if value_cols is None:
         value_cols = ["value_0h", "value_24h", "value_96h", "value_168h"]
@@ -61,15 +63,31 @@ def detect_anomalies(
 
     if len(preds.shape) > 1 and preds.shape[1] == 1:
         preds = preds.flatten()
-    out_df["is_if_anomaly"] = preds == -1
 
+    # FIX: is_if_anomaly used to be `preds == -1` -- the ONNX graph's baked
+    # label, decided at export time using whatever contamination rate the
+    # IsolationForest was fit with. That's a FIXED decision boundary: the
+    # `risk_tolerance` slider changed `threshold` (used below for
+    # is_lot_outlier) but had zero effect on this flag, no matter what the
+    # user set it to.
+    #
+    # The ONNX graph also outputs `scores` (raw decision_function values) as
+    # a second output -- it was being captured into isolation_forest_score
+    # but never read again. We now threshold THAT raw score using
+    # risk_tolerance, so the slider actually gates the isolation forest too.
+    # Falls back to the baked label only if this ONNX export doesn't expose
+    # a scores output (e.g. an older export).
     if len(outputs) > 1:
         scores = outputs[1]
         if len(scores.shape) > 1 and scores.shape[1] == 1:
             scores = scores.flatten()
-        out_df["isolation_forest_score"] = scores.astype(float)
+        scores = scores.astype(float)
+        out_df["isolation_forest_score"] = scores
+        _, if_flags = cost_sensitive_isolation_forest_threshold(scores, risk_tolerance=risk_tolerance)
+        out_df["is_if_anomaly"] = if_flags
     else:
         out_df["isolation_forest_score"] = 0.0
+        out_df["is_if_anomaly"] = preds == -1  # fallback: no score available
 
     out_df["robust_z_score"] = 0.0
     out_df["is_lot_outlier"] = False
