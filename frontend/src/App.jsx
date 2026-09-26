@@ -5,6 +5,7 @@ import {
   Activity,
   AlertTriangle,
   ChevronDown,
+  Crosshair,
   Info,
   LineChart,
   Loader2,
@@ -57,6 +58,8 @@ function normalizeRow(row) {
       row.predicted_168h != null ? Number(row.predicted_168h) : null,
     robust_z_score:
       row.robust_z_score != null ? Number(row.robust_z_score) : null,
+    datasheet_limit:
+      row.datasheet_limit != null ? Number(row.datasheet_limit) : null,
     is_anomaly: Boolean(row.is_anomaly),
     safety_slope_exceeded: Boolean(row.safety_slope_exceeded),
     justification:
@@ -151,17 +154,25 @@ function getFlaggedColor(row) {
   return '#94a3b8'
 }
 
-function buildChartOption(rows, datasheetLimit) {
+function buildChartOption(rows, datasheetLimit, mode = 'raw') {
   const series = []
   const legendEntries = []
+  const isPercent = mode === 'percent'
+
+  const scaleFor = (row) => {
+    if (!isPercent) return 1
+    const limit = row.datasheet_limit ?? datasheetLimit
+    return limit > 0 ? 100 / limit : 1
+  }
 
   rows.forEach((row) => {
     const flagged = isFlagged(row)
+    const scale = scaleFor(row)
     const trajectory = [
-      row.Value_0h,
-      row.Value_24h,
-      row.Value_96h,
-      row.Value_168h,
+      row.Value_0h * scale,
+      row.Value_24h * scale,
+      row.Value_96h * scale,
+      row.Value_168h * scale,
     ]
 
     series.push({
@@ -189,7 +200,7 @@ function buildChartOption(rows, datasheetLimit) {
       series.push({
         name: `${row.ComponentID} (predicted)`,
         type: 'line',
-        data: [null, null, row.Value_96h, row.predicted_168h],
+        data: [null, null, row.Value_96h * scale, row.predicted_168h * scale],
         symbol: ['none', 'none', 'circle', 'diamond'],
         symbolSize: 7,
         lineStyle: {
@@ -207,6 +218,10 @@ function buildChartOption(rows, datasheetLimit) {
     if (flagged) legendEntries.push(row.ComponentID)
   })
 
+  const limitLine = isPercent
+    ? { value: 100, label: 'Datasheet Limit (100%)' }
+    : { value: datasheetLimit, label: `Datasheet Limit (${datasheetLimit} µA)` }
+
   return {
     backgroundColor: 'transparent',
     animation: rows.length < 300,
@@ -221,7 +236,9 @@ function buildChartOption(rows, datasheetLimit) {
         const label = params.name || TIME_LABELS[params.dataIndex] || ''
         const value =
           params.value != null && !Number.isNaN(params.value)
-            ? `${Number(params.value).toFixed(2)} µA`
+            ? isPercent
+              ? `${Number(params.value).toFixed(1)}% of limit`
+              : `${Number(params.value).toFixed(2)} µA`
             : '—'
         return `<strong>${params.seriesName.replace(' (predicted)', '')}</strong><br/>${label}: ${value}`
       },
@@ -243,10 +260,13 @@ function buildChartOption(rows, datasheetLimit) {
     },
     yAxis: {
       type: 'value',
-      name: 'Parameter Value (µA)',
+      name: isPercent ? '% of Datasheet Limit' : 'Parameter Value (µA)',
       nameTextStyle: { color: '#94a3b8', padding: [0, 0, 0, 8] },
       axisLine: { show: false },
-      axisLabel: { color: '#94a3b8' },
+      axisLabel: {
+        color: '#94a3b8',
+        formatter: isPercent ? '{value}%' : '{value}',
+      },
       splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
     },
     series: [
@@ -260,12 +280,131 @@ function buildChartOption(rows, datasheetLimit) {
           symbol: 'none',
           lineStyle: { color: '#fb923c', type: 'dotted', width: 2 },
           label: {
-            formatter: `Datasheet Limit (${datasheetLimit} µA)`,
+            formatter: limitLine.label,
             color: '#fdba74',
             position: 'insideEndTop',
           },
-          data: [{ yAxis: datasheetLimit }],
+          data: [{ yAxis: limitLine.value }],
         },
+      },
+    ],
+  }
+}
+
+function buildParityChartOption(rows) {
+  const points = rows.filter(
+    (row) =>
+      row.predicted_168h != null &&
+      !Number.isNaN(row.predicted_168h) &&
+      !Number.isNaN(row.Value_168h),
+  )
+
+  if (points.length === 0) {
+    return {
+      backgroundColor: 'transparent',
+      title: {
+        text: 'No prediction data available',
+        left: 'center',
+        top: 'middle',
+        textStyle: { color: '#64748b', fontSize: 13, fontWeight: 'normal' },
+      },
+    }
+  }
+
+  const allValues = points.flatMap((row) => [row.Value_168h, row.predicted_168h])
+  const min = Math.min(...allValues)
+  const max = Math.max(...allValues)
+  const pad = (max - min) * 0.05 || 1
+  const lo = Math.max(0, min - pad)
+  const hi = max + pad
+
+  const flaggedPoints = []
+  const passPoints = []
+
+  points.forEach((row) => {
+    const point = {
+      value: [row.Value_168h, row.predicted_168h],
+      name: row.ComponentID,
+      error: row.predicted_168h - row.Value_168h,
+    }
+    if (isFlagged(row)) {
+      flaggedPoints.push({ ...point, itemStyle: { color: getFlaggedColor(row) } })
+    } else {
+      passPoints.push(point)
+    }
+  })
+
+  return {
+    backgroundColor: 'transparent',
+    animation: points.length < 500,
+    grid: { left: 64, right: 24, top: 24, bottom: 56 },
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: '#0f172a',
+      borderColor: '#334155',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+      formatter(params) {
+        if (!params?.data || params.seriesType !== 'scatter') return ''
+        const [actual, predicted] = params.data.value
+        const error = params.data.error
+        return (
+          `<strong>${params.data.name}</strong><br/>` +
+          `Actual 168h: ${Number(actual).toFixed(2)} µA<br/>` +
+          `Predicted 168h: ${Number(predicted).toFixed(2)} µA<br/>` +
+          `Error: ${error >= 0 ? '+' : ''}${Number(error).toFixed(2)} µA`
+        )
+      },
+    },
+    xAxis: {
+      type: 'value',
+      name: 'Actual Value_168h (µA)',
+      nameLocation: 'middle',
+      nameGap: 32,
+      nameTextStyle: { color: '#94a3b8' },
+      min: lo,
+      max: hi,
+      axisLine: { lineStyle: { color: '#475569' } },
+      axisLabel: { color: '#94a3b8' },
+      splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Predicted 168h (µA)',
+      nameTextStyle: { color: '#94a3b8', padding: [0, 0, 0, 8] },
+      min: lo,
+      max: hi,
+      axisLine: { show: false },
+      axisLabel: { color: '#94a3b8' },
+      splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
+    },
+    series: [
+      {
+        name: 'Perfect prediction',
+        type: 'line',
+        data: [
+          [lo, lo],
+          [hi, hi],
+        ],
+        showSymbol: false,
+        lineStyle: { color: '#fb923c', type: 'dashed', width: 1.5, opacity: 0.7 },
+        tooltip: { show: false },
+        z: 1,
+      },
+      {
+        name: 'Pass',
+        type: 'scatter',
+        data: passPoints,
+        symbolSize: 6,
+        itemStyle: { color: '#64748b', opacity: 0.35 },
+        z: 2,
+      },
+      {
+        name: 'Flagged',
+        type: 'scatter',
+        data: flaggedPoints,
+        symbolSize: 8,
+        itemStyle: { opacity: 0.9 },
+        z: 3,
       },
     ],
   }
@@ -475,6 +614,7 @@ export default function App() {
   const [fileName, setFileName] = useState(null)
   const [explanations, setExplanations] = useState({})
   const [rowLoading, setRowLoading] = useState({})
+  const [valueMode, setValueMode] = useState('raw') // 'raw' | 'percent'
 
   const filteredRows = useMemo(() => {
     if (!results?.data) return []
@@ -503,8 +643,13 @@ export default function App() {
   }, [filteredRows.length, flaggedInView])
 
   const chartOption = useMemo(
-    () => buildChartOption(filteredRows, datasheetLimit),
-    [filteredRows, datasheetLimit],
+    () => buildChartOption(filteredRows, datasheetLimit, valueMode),
+    [filteredRows, datasheetLimit, valueMode],
+  )
+
+  const parityOption = useMemo(
+    () => buildParityChartOption(filteredRows),
+    [filteredRows],
   )
 
   const handleUpload = useCallback(async (event) => {
@@ -740,6 +885,12 @@ export default function App() {
             label="Trajectory Visualizer"
           />
           <TabButton
+            active={activeTab === 'accuracy'}
+            onClick={() => setActiveTab('accuracy')}
+            icon={Crosshair}
+            label="Prediction Accuracy"
+          />
+          <TabButton
             active={activeTab === 'registry'}
             onClick={() => setActiveTab('registry')}
             icon={TableProperties}
@@ -752,15 +903,51 @@ export default function App() {
         <main className="min-h-0 flex-1 overflow-hidden">
           {activeTab === 'visualizer' ? (
             <Card className="flex h-full flex-col border-slate-800 bg-slate-900/70 ring-slate-800">
-              <CardHeader className="shrink-0 pb-2">
-                <CardTitle className="text-slate-50">
-                  Parametric Trajectory Visualizer
-                </CardTitle>
-                <CardDescription className="text-slate-400">
-                  Faint slate traces for passing components; bold red/amber for
-                  flagged items. Dashed segments show Module B predicted 168h
-                  from the 96h measurement.
-                </CardDescription>
+              <CardHeader className="shrink-0 flex-row items-start justify-between gap-3 pb-2">
+                <div>
+                  <CardTitle className="text-slate-50">
+                    Parametric Trajectory Visualizer
+                  </CardTitle>
+                  <CardDescription className="text-slate-400">
+                    {valueMode === 'percent' ? (
+                      <>
+                        Each trace shown as % of that component's own datasheet
+                        limit, so tiers with different absolute scales (µA)
+                        are directly comparable. 100% = at limit.
+                      </>
+                    ) : (
+                      <>
+                        Faint slate traces for passing components; bold
+                        red/amber for flagged items. Dashed segments show
+                        Module B predicted 168h from the 96h measurement.
+                      </>
+                    )}
+                  </CardDescription>
+                </div>
+                <div className="flex shrink-0 border border-slate-700">
+                  <button
+                    type="button"
+                    onClick={() => setValueMode('raw')}
+                    className={`h-8 px-3 text-xs font-medium transition-colors ${
+                      valueMode === 'raw'
+                        ? 'bg-amber-500/15 text-amber-300'
+                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                    }`}
+                  >
+                    Raw µA
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setValueMode('percent')}
+                    className={`h-8 border-l border-slate-700 px-3 text-xs font-medium transition-colors ${
+                      valueMode === 'percent'
+                        ? 'bg-amber-500/15 text-amber-300'
+                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                    }`}
+                  >
+                    % of Limit
+                  </button>
+                </div>
               </CardHeader>
               <CardContent className="min-h-0 flex-1 pb-4">
                 {loading ? (
@@ -781,6 +968,46 @@ export default function App() {
                 ) : (
                   <ReactECharts
                     option={chartOption}
+                    style={{ height: '100%', width: '100%' }}
+                    notMerge
+                    lazyUpdate
+                  />
+                )}
+              </CardContent>
+            </Card>
+          ) : activeTab === 'accuracy' ? (
+            <Card className="flex h-full flex-col border-slate-800 bg-slate-900/70 ring-slate-800">
+              <CardHeader className="shrink-0 pb-2">
+                <CardTitle className="text-slate-50">
+                  Predicted vs. Actual 168h (Module B)
+                </CardTitle>
+                <CardDescription className="text-slate-400">
+                  Each point is one component. Distance from the dashed
+                  diagonal is the prediction error — points above the line are
+                  over-predicted, below are under-predicted. Flagged
+                  components are colored red/amber; passing components are
+                  faint slate.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="min-h-0 flex-1 pb-4">
+                {loading ? (
+                  <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-4 border border-dashed border-slate-800 bg-slate-950/50">
+                    <BouncingDots />
+                    <p className="text-sm font-medium text-amber-500/80 animate-pulse">
+                      Generating LLM explanations & running anomaly models...
+                    </p>
+                  </div>
+                ) : !results ? (
+                  <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 border border-dashed border-slate-800 bg-slate-950/50 text-slate-500">
+                    <Crosshair className="size-8 opacity-40" />
+                    <p className="text-sm">
+                      Upload a burn-in CSV to compare predicted vs. actual
+                      168h values
+                    </p>
+                  </div>
+                ) : (
+                  <ReactECharts
+                    option={parityOption}
                     style={{ height: '100%', width: '100%' }}
                     notMerge
                     lazyUpdate

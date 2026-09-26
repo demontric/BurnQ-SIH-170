@@ -6,7 +6,6 @@ import pandas as pd
 
 from models.outlier_detection import detect_anomalies
 from models.drift_predictor import predict_168h
-from models.explainability import generate_justification
 
 COLUMN_ALIASES = {
     "ComponentID": "part_id", "component_id": "part_id", "PartID": "part_id",
@@ -54,15 +53,6 @@ def normalize_input(df: pd.DataFrame, datasheet_limit=None) -> pd.DataFrame:
         )
 
     return out
-
-def _lot_stats(df: pd.DataFrame, value_col: str):
-    stats = {}
-    for (lot, param), group in df.groupby(["lot_id", "parameter"]):
-        vals = pd.to_numeric(group[value_col], errors="coerce").dropna()
-        med = float(vals.median()) if len(vals) else 0.0
-        mad = float(np.median(np.abs(vals - med))) if len(vals) else 1e-6
-        stats[(lot, param)] = (med, max(mad, 1e-6))
-    return stats
 
 def run_screening(df: pd.DataFrame, datasheet_limit=None, risk_tolerance=50.0) -> dict:
     raw = normalize_input(df, datasheet_limit=datasheet_limit)

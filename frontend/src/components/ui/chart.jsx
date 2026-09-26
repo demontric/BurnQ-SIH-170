@@ -1,16 +1,16 @@
 import * as React from "react"
-import { cn } from "cn"
+import { cn } from "@/lib/utils" // FIX: was `import { cn } from "cn"` — no such package; point at your actual utils path
 import * as RechartsPrimitive from "recharts"
 
 // Format: { THEME_NAME: CSS_SELECTOR }
 const THEMES = {
   light: "",
-  dark: ".dark"
+  dark: ".dark",
 }
 
 const INITIAL_DIMENSION = {
   width: 320,
-  height: 200
+  height: 200,
 }
 
 const ChartContext = React.createContext(null)
@@ -42,15 +42,28 @@ function ChartContainer({
         data-slot="chart"
         data-chart={chartId}
         className={cn(
-          "flex aspect-video justify-center text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
+          // Restyled to the dashboard's dark slate/amber palette instead of
+          // relying on generic shadcn --background/--border tokens, which
+          // aren't defined anywhere else in this app.
+          "dark flex aspect-video justify-center text-xs text-slate-300",
+          "[&_.recharts-cartesian-axis-tick_text]:fill-slate-400",
+          "[&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-slate-800",
+          "[&_.recharts-curve.recharts-tooltip-cursor]:stroke-slate-700",
+          "[&_.recharts-dot[stroke='#fff']]:stroke-transparent",
+          "[&_.recharts-layer]:outline-hidden",
+          "[&_.recharts-polar-grid_[stroke='#ccc']]:stroke-slate-800",
+          "[&_.recharts-radial-bar-background-sector]:fill-slate-800",
+          "[&_.recharts-rectangle.recharts-tooltip-cursor]:fill-slate-800/40",
+          "[&_.recharts-reference-line_[stroke='#ccc']]:stroke-slate-700",
+          "[&_.recharts-sector]:outline-hidden",
+          "[&_.recharts-sector[stroke='#fff']]:stroke-transparent",
+          "[&_.recharts-surface]:outline-hidden",
           className
         )}
         {...props}
       >
         <ChartStyle id={chartId} config={config} />
-        <RechartsPrimitive.ResponsiveContainer
-          initialDimension={initialDimension}
-        >
+        <RechartsPrimitive.ResponsiveContainer initialDimension={initialDimension}>
           {children}
         </RechartsPrimitive.ResponsiveContainer>
       </div>
@@ -58,12 +71,9 @@ function ChartContainer({
   )
 }
 
-const ChartStyle = ({
-  id,
-  config
-}) => {
+const ChartStyle = ({ id, config }) => {
   const colorConfig = Object.entries(config).filter(
-    ([, config]) => config.theme ?? config.color
+    ([, itemCfg]) => itemCfg.theme ?? itemCfg.color
   )
 
   if (!colorConfig.length) {
@@ -78,10 +88,8 @@ const ChartStyle = ({
             ([theme, prefix]) => `
 ${prefix} [data-chart=${id}] {
 ${colorConfig
-  .map(([key, itemConfig]) => {
-    const color =
-      itemConfig.theme?.[theme] ??
-      itemConfig.color
+  .map(([key, itemCfg]) => {
+    const color = itemCfg.theme?.[theme] ?? itemCfg.color
     return color ? `  --color-${key}: ${color};` : null
   })
   .join("\n")}
@@ -91,7 +99,7 @@ ${colorConfig
           .join("\n"),
       }}
     />
-  );
+  )
 }
 
 const ChartTooltip = RechartsPrimitive.Tooltip
@@ -109,7 +117,7 @@ function ChartTooltipContent({
   formatter,
   color,
   nameKey,
-  labelKey
+  labelKey,
 }) {
   const { config } = useChart()
 
@@ -128,7 +136,7 @@ function ChartTooltipContent({
 
     if (labelFormatter) {
       return (
-        <div className={cn("font-medium", labelClassName)}>
+        <div className={cn("font-medium text-slate-100", labelClassName)}>
           {labelFormatter(value, payload)}
         </div>
       )
@@ -138,16 +146,8 @@ function ChartTooltipContent({
       return null
     }
 
-    return <div className={cn("font-medium", labelClassName)}>{value}</div>
-  }, [
-    label,
-    labelFormatter,
-    payload,
-    hideLabel,
-    labelClassName,
-    config,
-    labelKey,
-  ])
+    return <div className={cn("font-medium text-slate-100", labelClassName)}>{value}</div>
+  }, [label, labelFormatter, payload, hideLabel, labelClassName, config, labelKey])
 
   if (!active || !payload?.length) {
     return null
@@ -158,7 +158,7 @@ function ChartTooltipContent({
   return (
     <div
       className={cn(
-        "grid min-w-32 items-start gap-1.5 border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl",
+        "grid min-w-32 items-start gap-1.5 border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-300 shadow-xl",
         className
       )}
     >
@@ -175,7 +175,7 @@ function ChartTooltipContent({
               <div
                 key={index}
                 className={cn(
-                  "flex w-full flex-wrap items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5 [&>svg]:text-muted-foreground",
+                  "flex w-full flex-wrap items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5 [&>svg]:text-slate-400",
                   indicator === "dot" && "items-center"
                 )}
               >
@@ -188,22 +188,17 @@ function ChartTooltipContent({
                     ) : (
                       !hideIndicator && (
                         <div
-                          className={cn(
-                            "shrink-0 border-(--color-border) bg-(--color-bg)",
-                            {
-                              "h-2.5 w-2.5": indicator === "dot",
-                              "w-1": indicator === "line",
-                              "w-0 border-[1.5px] border-dashed bg-transparent":
-                                indicator === "dashed",
-                              "my-0.5": nestLabel && indicator === "dashed",
-                            }
-                          )}
-                          style={
-                            {
-                              "--color-bg": indicatorColor,
-                              "--color-border": indicatorColor
-                            }
-                          }
+                          className={cn("shrink-0 border-(--color-border) bg-(--color-bg)", {
+                            "h-2.5 w-2.5": indicator === "dot",
+                            "w-1": indicator === "line",
+                            "w-0 border-[1.5px] border-dashed bg-transparent":
+                              indicator === "dashed",
+                            "my-0.5": nestLabel && indicator === "dashed",
+                          })}
+                          style={{
+                            "--color-bg": indicatorColor,
+                            "--color-border": indicatorColor,
+                          }}
                         />
                       )
                     )}
@@ -215,12 +210,10 @@ function ChartTooltipContent({
                     >
                       <div className="grid gap-1.5">
                         {nestLabel ? tooltipLabel : null}
-                        <span className="text-muted-foreground">
-                          {itemConfig?.label ?? item.name}
-                        </span>
+                        <span className="text-slate-400">{itemConfig?.label ?? item.name}</span>
                       </div>
                       {item.value != null && (
-                        <span className="font-mono font-medium text-foreground tabular-nums">
+                        <span className="font-mono font-medium text-slate-100 tabular-nums">
                           {typeof item.value === "number"
                             ? item.value.toLocaleString()
                             : String(item.value)}
@@ -230,11 +223,11 @@ function ChartTooltipContent({
                   </>
                 )}
               </div>
-            );
+            )
           })}
       </div>
     </div>
-  );
+  )
 }
 
 const ChartLegend = RechartsPrimitive.Legend
@@ -244,7 +237,7 @@ function ChartLegendContent({
   hideIcon = false,
   payload,
   verticalAlign = "bottom",
-  nameKey
+  nameKey,
 }) {
   const { config } = useChart()
 
@@ -255,7 +248,7 @@ function ChartLegendContent({
   return (
     <div
       className={cn(
-        "flex items-center justify-center gap-4",
+        "flex items-center justify-center gap-4 text-slate-400",
         verticalAlign === "top" ? "pb-3" : "pt-3",
         className
       )}
@@ -269,19 +262,12 @@ function ChartLegendContent({
           return (
             <div
               key={index}
-              className={cn(
-                "flex items-center gap-1.5 [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-muted-foreground"
-              )}
+              className="flex items-center gap-1.5 [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-slate-400"
             >
               {itemConfig?.icon && !hideIcon ? (
                 <itemConfig.icon />
               ) : (
-                <div
-                  className="h-2 w-2 shrink-0"
-                  style={{
-                    backgroundColor: item.color,
-                  }}
-                />
+                <div className="h-2 w-2 shrink-0" style={{ backgroundColor: item.color }} />
               )}
               {itemConfig?.label}
             </div>
@@ -291,28 +277,19 @@ function ChartLegendContent({
   )
 }
 
-function getPayloadConfigFromPayload(
-  config,
-  payload,
-  key
-) {
+function getPayloadConfigFromPayload(config, payload, key) {
   if (typeof payload !== "object" || payload === null) {
     return undefined
   }
 
   const payloadPayload =
-    "payload" in payload &&
-    typeof payload.payload === "object" &&
-    payload.payload !== null
+    "payload" in payload && typeof payload.payload === "object" && payload.payload !== null
       ? payload.payload
       : undefined
 
   let configLabelKey = key
 
-  if (
-    key in payload &&
-    typeof payload[key] === "string"
-  ) {
+  if (key in payload && typeof payload[key] === "string") {
     configLabelKey = payload[key]
   } else if (
     payloadPayload &&
