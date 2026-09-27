@@ -399,6 +399,8 @@ def run_screening(
         "robust_z_score",
         "isolation_forest_score",
         "is_anomaly",
+        "is_if_anomaly",
+        "is_lot_outlier",
 
         "safety_slope_exceeded",
 

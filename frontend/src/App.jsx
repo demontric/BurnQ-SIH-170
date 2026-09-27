@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import ReactECharts from 'echarts-for-react'
 import {
@@ -36,8 +36,16 @@ const API_URL =
   import.meta.env.VITE_API_URL ?? '/api/detect-anomaly'
 const TIME_LABELS = ['0h', '24h', '96h', '168h']
 
+function normalizeStatus(value) {
+  const status = String(value ?? '').trim().toUpperCase()
+  return ['PASS', 'WATCH', 'REJECT'].includes(status) ? status : null
+}
+
 function isFlagged(row) {
-  return Boolean(row.is_anomaly || row.safety_slope_exceeded)
+  const status = normalizeStatus(row?.status)
+  if (status === 'PASS') return false
+  if (status === 'WATCH' || status === 'REJECT') return true
+  return Boolean(row?.is_anomaly || row?.safety_slope_exceeded)
 }
 
 function lotKey(value) {
@@ -45,43 +53,151 @@ function lotKey(value) {
   return String(value).trim()
 }
 
+const PARAMETER_META = {
+  leakage_current: { label: 'Leakage Current', unit: 'µA' },
+  leakage: { label: 'Leakage Current', unit: 'µA' },
+  iddq: { label: 'IDDQ', unit: 'µA' },
+  prop_delay: { label: 'Propagation Delay', unit: 'ns' },
+  propagation_delay: { label: 'Propagation Delay', unit: 'ns' },
+}
+
+const REASON_MESSAGES = {
+  ABSOLUTE_LIMIT_EXCEEDED: 'Measured value exceeds the datasheet limit.',
+  LOT_RELATIVE_OUTLIER: 'Parameter is significantly above the normal distribution for its lot.',
+  PREDICTED_LIMIT_BREACH: 'Predicted 168h value exceeds the datasheet limit.',
+  SAFETY_SLOPE_EXCEEDED: 'Predicted drift exceeds the calibrated safety slope.',
+}
+
 function humanizeParameter(value) {
   if (!value) return 'Unknown'
-  const SPECIAL = { iddq: 'IDDQ', prop_delay: 'Propagation Delay', propagation_delay: 'Propagation Delay' }
   const key = String(value).toLowerCase()
-  if (SPECIAL[key]) return SPECIAL[key]
+  if (PARAMETER_META[key]) return PARAMETER_META[key].label
   return String(value)
     .split(/[_\s]+/)
-    .map((word) => SPECIAL[word.toLowerCase()] ?? word.charAt(0).toUpperCase() + word.slice(1))
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ')
 }
 
+function parameterUnit(parameter) {
+  const key = String(parameter ?? '').toLowerCase()
+  return PARAMETER_META[key]?.unit ?? 'units'
+}
+
+function getCommonUnit(rows) {
+  const units = [...new Set(rows.map((row) => parameterUnit(row.parameter)))]
+  return units.length === 1 ? units[0] : 'native units'
+}
+
+function toFiniteNumber(value, fallback = null) {
+  if (value == null || value === '') return fallback
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : fallback
+}
+
+function normalizeReasonCodes(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((code) => String(code ?? '').trim())
+      .filter(Boolean)
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return []
+
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (Array.isArray(parsed)) return normalizeReasonCodes(parsed)
+      } catch {
+        // Fall through and treat the value as one reason code.
+      }
+    }
+
+    return [trimmed]
+  }
+
+  return []
+}
+
+function reasonText(reasonCodes) {
+  const codes = normalizeReasonCodes(reasonCodes)
+  if (codes.length === 0) return ''
+  return codes
+    .map((code) => REASON_MESSAGES[code] ?? `Flagged for rule: ${code}.`)
+    .join(' ')
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
+function formatValue(value, parameter, decimals = 2) {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return `${Number(value).toFixed(decimals)} ${parameterUnit(parameter)}`
+}
+
+function formatLimit(value, parameter, decimals = 2) {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return `${Number(value).toFixed(decimals)} ${parameterUnit(parameter)}`
+}
+
+function formatSignedValue(value, parameter, decimals = 2) {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  const numeric = Number(value)
+  return `${numeric >= 0 ? '+' : ''}${numeric.toFixed(decimals)} ${parameterUnit(parameter)}`
+}
+
 function normalizeRow(row) {
+  const parameter = row.parameter ?? row.Parameter ?? 'unknown'
+  const statusFromApi = normalizeStatus(row.status)
+  const reason_codes = normalizeReasonCodes(row.reason_codes)
+  const status = statusFromApi ?? (row.is_anomaly || row.safety_slope_exceeded ? 'WATCH' : 'PASS')
+  const backendJustification =
+    typeof row.justification === 'string' && row.justification.trim()
+      ? row.justification.trim()
+      : ''
+
   return {
     ComponentID:
       row.ComponentID ?? row.component_id ?? row.part_id ?? row.PartID ?? '—',
     Lot: lotKey(row.Lot ?? row.lot_id ?? row.lot),
-    parameter: row.parameter ?? row.Parameter ?? 'unknown',
-    Value_0h: Number(row.Value_0h ?? row.value_0h ?? 0),
-    Value_24h: Number(row.Value_24h ?? row.value_24h ?? 0),
-    Value_96h: Number(row.Value_96h ?? row.value_96h ?? 0),
-    Value_168h: Number(row.Value_168h ?? row.value_168h ?? 0),
+    parameter,
+    Value_0h: toFiniteNumber(row.Value_0h ?? row.value_0h, 0),
+    Value_24h: toFiniteNumber(row.Value_24h ?? row.value_24h, 0),
+    Value_96h: toFiniteNumber(row.Value_96h ?? row.value_96h, 0),
+    Value_168h: toFiniteNumber(row.Value_168h ?? row.value_168h, 0),
     predicted_168h:
-      row.predicted_168h != null ? Number(row.predicted_168h) : null,
+      row.predicted_168h != null ? toFiniteNumber(row.predicted_168h) : null,
     robust_z_score:
-      row.robust_z_score != null ? Number(row.robust_z_score) : null,
+      row.robust_z_score != null ? toFiniteNumber(row.robust_z_score) : null,
+    isolation_forest_score:
+      row.isolation_forest_score != null
+        ? toFiniteNumber(row.isolation_forest_score)
+        : null,
+    predicted_drift_rate:
+      row.predicted_drift_rate != null
+        ? toFiniteNumber(row.predicted_drift_rate)
+        : null,
+    safety_slope:
+      row.safety_slope != null ? toFiniteNumber(row.safety_slope) : null,
     datasheet_limit:
-      row.datasheet_limit != null ? Number(row.datasheet_limit) : null,
+      row.datasheet_limit != null ? toFiniteNumber(row.datasheet_limit) : null,
     is_anomaly: Boolean(row.is_anomaly),
     safety_slope_exceeded: Boolean(row.safety_slope_exceeded),
+    status,
+    reason_codes,
     justification:
-      row.justification ??
-      (isFlagged({
-        is_anomaly: row.is_anomaly,
-        safety_slope_exceeded: row.safety_slope_exceeded,
-      })
-        ? 'Flagged due to abnormal drift or statistical deviation.'
-        : 'Normal part.'),
+      backendJustification ||
+      reasonText(reason_codes) ||
+      (status === 'PASS'
+        ? 'Component passed screening.'
+        : 'Component was flagged by the screening pipeline.'),
   }
 }
 
@@ -97,13 +213,15 @@ function parseApiResponse(payload) {
     payload?.flagged_count ?? data.filter(isFlagged).length
 
   return {
-    // Physical component count (unique part_id) vs. parametric row count --
-    // these differ whenever a component has more than one measured
-    // parameter. Fall back gracefully for an older backend response shape.
     components: payload?.components ?? payload?.total_components ?? data.length,
     parametric_records:
       payload?.parametric_records ?? payload?.total_components ?? data.length,
     flagged_count,
+    mae: payload?.mae != null ? toFiniteNumber(payload.mae) : null,
+    mae_by_parameter:
+      payload?.mae_by_parameter && typeof payload.mae_by_parameter === 'object'
+        ? payload.mae_by_parameter
+        : {},
     data,
   }
 }
@@ -123,67 +241,60 @@ function computeMae(rows) {
   return total / pairs.length
 }
 
-function formatMicroamps(value) {
-  if (value == null || Number.isNaN(value)) return '—'
-  return `${value.toFixed(2)} µA`
-}
-
 function formatZScore(value) {
-  if (value == null || Number.isNaN(value)) return '—'
-  return value.toFixed(2)
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return Number(value).toFixed(2)
 }
 
 function getStatusBadge(row) {
-  if (row.is_anomaly && row.safety_slope_exceeded) {
+  const status = normalizeStatus(row.status) ?? 'PASS'
+
+  if (status === 'REJECT') {
     return (
       <Badge variant="destructive" className="bg-red-500/20 text-red-300">
-        Anomaly + Drift
+        REJECT
       </Badge>
     )
   }
-  if (row.is_anomaly) {
-    return (
-      <Badge variant="destructive" className="bg-red-500/20 text-red-300">
-        Outlier
-      </Badge>
-    )
-  }
-  if (row.safety_slope_exceeded) {
+
+  if (status === 'WATCH') {
     return (
       <Badge
         variant="outline"
         className="border-amber-500/50 bg-amber-500/15 text-amber-300"
       >
-        Drift Risk
+        WATCH
       </Badge>
     )
   }
+
   return (
     <Badge variant="secondary" className="bg-slate-800 text-slate-300">
-      Pass
+      PASS
     </Badge>
   )
 }
 
 function getFlaggedColor(row) {
-  if (row.is_anomaly) return '#ef4444'
-  if (row.safety_slope_exceeded) return '#f59e0b'
+  const status = normalizeStatus(row.status)
+  if (status === 'REJECT') return '#ef4444'
+  if (status === 'WATCH') return '#f59e0b'
   return '#94a3b8'
 }
 
 function buildChartOption(rows, mode = 'raw', activeLimit = null) {
   const series = []
   const legendEntries = []
+  const tooltipMeta = []
   const isPercent = mode === 'percent'
 
   const scaleFor = (row) => {
     if (!isPercent) return 1
-    // Always scale by THIS row's own datasheet limit -- rows can span
-    // multiple parameters (leakage current, IDDQ, propagation delay, ...)
-    // with very different absolute scales and limits, even in one view.
     const limit = row.datasheet_limit ?? activeLimit
     return limit > 0 ? 100 / limit : 1
   }
+
+  const yAxisUnit = getCommonUnit(rows)
 
   rows.forEach((row) => {
     const flagged = isFlagged(row)
@@ -215,6 +326,7 @@ function buildChartOption(rows, mode = 'raw', activeLimit = null) {
       },
       z: flagged ? 10 : 1,
     })
+    tooltipMeta.push({ row, predicted: false })
 
     if (flagged && row.predicted_168h != null) {
       series.push({
@@ -232,21 +344,20 @@ function buildChartOption(rows, mode = 'raw', activeLimit = null) {
         itemStyle: { color: getFlaggedColor(row) },
         z: 11,
       })
+      tooltipMeta.push({ row, predicted: true })
       legendEntries.push(`${row.ComponentID} (predicted)`)
     }
 
     if (flagged) legendEntries.push(row.ComponentID)
   })
 
-  // In raw µA mode, a single flat reference line is only meaningful when
-  // every visible row shares one datasheet limit (i.e. one parameter is
-  // selected). With "All Parameters" selected, limits can differ by 30x --
-  // drawing one flat line would misrepresent most of what's on screen, so
-  // skip it entirely rather than show a misleading number.
   const limitLine = isPercent
     ? { value: 100, label: 'Datasheet Limit (100%)' }
     : activeLimit != null
-      ? { value: activeLimit, label: `Datasheet Limit (${activeLimit} µA)` }
+      ? {
+          value: activeLimit,
+          label: `Datasheet Limit (${formatLimit(activeLimit, rows[0]?.parameter)})`,
+        }
       : null
 
   return {
@@ -259,15 +370,33 @@ function buildChartOption(rows, mode = 'raw', activeLimit = null) {
       borderColor: '#334155',
       textStyle: { color: '#e2e8f0', fontSize: 12 },
       formatter(params) {
-        if (!params?.seriesName) return ''
-        const label = params.name || TIME_LABELS[params.dataIndex] || ''
+        const meta = tooltipMeta[params?.seriesIndex]
+        if (!meta?.row) return ''
+
+        const row = meta.row
+        const label = TIME_LABELS[params.dataIndex] ?? ''
         const value =
-          params.value != null && !Number.isNaN(params.value)
+          params.value != null && !Number.isNaN(Number(params.value))
             ? isPercent
               ? `${Number(params.value).toFixed(1)}% of limit`
-              : `${Number(params.value).toFixed(2)} µA`
+              : formatValue(Number(params.value), row.parameter)
             : '—'
-        return `<strong>${params.seriesName.replace(' (predicted)', '')}</strong><br/>${label}: ${value}`
+        const status = escapeHtml(row.status)
+        const parameter = escapeHtml(humanizeParameter(row.parameter))
+        const justification = escapeHtml(row.justification)
+        const reasonCodes = row.reason_codes.length
+          ? `<br/><span style="color:#fbbf24">Reason:</span> ${escapeHtml(reasonText(row.reason_codes))}`
+          : ''
+
+        return (
+          `<strong>${escapeHtml(row.ComponentID)}</strong><br/>` +
+          `Parameter: ${parameter}<br/>` +
+          `Status: <strong>${status}</strong><br/>` +
+          `${label}: ${escapeHtml(value)}<br/>` +
+          `Prediction: ${meta.predicted ? 'Module B 168h forecast' : 'Measured trajectory'}<br/>` +
+          `<span style="color:#cbd5e1">${justification}</span>` +
+          reasonCodes
+        )
       },
     },
     legend: {
@@ -287,7 +416,9 @@ function buildChartOption(rows, mode = 'raw', activeLimit = null) {
     },
     yAxis: {
       type: 'value',
-      name: isPercent ? '% of Datasheet Limit' : 'Parameter Value (µA)',
+      name: isPercent
+        ? '% of Datasheet Limit'
+        : `Parameter Value (${yAxisUnit})`,
       nameTextStyle: { color: '#94a3b8', padding: [0, 0, 0, 8] },
       axisLine: { show: false },
       axisLabel: {
@@ -322,12 +453,28 @@ function buildChartOption(rows, mode = 'raw', activeLimit = null) {
   }
 }
 
+function niceAxisBounds(minValue, maxValue) {
+  const rawMin = Math.max(0, Number(minValue) || 0)
+  const rawMax = Math.max(rawMin, Number(maxValue) || rawMin + 1)
+  const paddedMin = Math.max(0, rawMin - (rawMax - rawMin) * 0.05)
+  const paddedMax = rawMax + (rawMax - rawMin) * 0.05
+  const range = Math.max(paddedMax - paddedMin, 1e-9)
+  const roughStep = range / 6
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep))
+  const normalized = roughStep / magnitude
+  const stepMultiplier = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10
+  const step = magnitude * stepMultiplier
+  const lo = Math.max(0, Math.floor(paddedMin / step) * step)
+  const hi = Math.ceil(paddedMax / step) * step
+  return { lo, hi: hi > lo ? hi : lo + step, step }
+}
+
 function buildParityChartOption(rows) {
   const points = rows.filter(
     (row) =>
       row.predicted_168h != null &&
-      !Number.isNaN(row.predicted_168h) &&
-      !Number.isNaN(row.Value_168h),
+      !Number.isNaN(Number(row.predicted_168h)) &&
+      !Number.isNaN(Number(row.Value_168h)),
   )
 
   if (points.length === 0) {
@@ -343,11 +490,10 @@ function buildParityChartOption(rows) {
   }
 
   const allValues = points.flatMap((row) => [row.Value_168h, row.predicted_168h])
-  const min = Math.min(...allValues)
-  const max = Math.max(...allValues)
-  const pad = (max - min) * 0.05 || 1
-  const lo = Math.max(0, min - pad)
-  const hi = max + pad
+  const minValue = Math.min(...allValues)
+  const maxValue = Math.max(...allValues)
+  const { lo, hi, step } = niceAxisBounds(minValue, maxValue)
+  const commonUnit = getCommonUnit(points)
 
   const flaggedPoints = []
   const passPoints = []
@@ -357,7 +503,9 @@ function buildParityChartOption(rows) {
       value: [row.Value_168h, row.predicted_168h],
       name: row.ComponentID,
       error: row.predicted_168h - row.Value_168h,
+      row,
     }
+
     if (isFlagged(row)) {
       flaggedPoints.push({ ...point, itemStyle: { color: getFlaggedColor(row) } })
     } else {
@@ -375,37 +523,54 @@ function buildParityChartOption(rows) {
       borderColor: '#334155',
       textStyle: { color: '#e2e8f0', fontSize: 12 },
       formatter(params) {
-        if (!params?.data || params.seriesType !== 'scatter') return ''
+        if (!params?.data?.row || params.seriesType !== 'scatter') return ''
+        const row = params.data.row
         const [actual, predicted] = params.data.value
         const error = params.data.error
+        const reasonCodes = row.reason_codes.length
+          ? `<br/><span style="color:#fbbf24">Reason:</span> ${escapeHtml(reasonText(row.reason_codes))}`
+          : ''
+
         return (
-          `<strong>${params.data.name}</strong><br/>` +
-          `Actual 168h: ${Number(actual).toFixed(2)} µA<br/>` +
-          `Predicted 168h: ${Number(predicted).toFixed(2)} µA<br/>` +
-          `Error: ${error >= 0 ? '+' : ''}${Number(error).toFixed(2)} µA`
+          `<strong>${escapeHtml(row.ComponentID)}</strong><br/>` +
+          `Parameter: ${escapeHtml(humanizeParameter(row.parameter))}<br/>` +
+          `Status: <strong>${escapeHtml(row.status)}</strong><br/>` +
+          `Actual 168h: ${escapeHtml(formatValue(actual, row.parameter))}<br/>` +
+          `Predicted 168h: ${escapeHtml(formatValue(predicted, row.parameter))}<br/>` +
+          `Error: ${escapeHtml(formatSignedValue(error, row.parameter))}<br/>` +
+          `${escapeHtml(row.justification)}` +
+          reasonCodes
         )
       },
     },
     xAxis: {
       type: 'value',
-      name: 'Actual Value_168h (µA)',
+      name: `Actual 168h (${commonUnit})`,
       nameLocation: 'middle',
       nameGap: 32,
       nameTextStyle: { color: '#94a3b8' },
       min: lo,
       max: hi,
+      interval: step,
       axisLine: { lineStyle: { color: '#475569' } },
-      axisLabel: { color: '#94a3b8' },
+      axisLabel: {
+        color: '#94a3b8',
+        formatter: (value) => Number(value).toFixed(step < 1 ? 1 : 0),
+      },
       splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
     },
     yAxis: {
       type: 'value',
-      name: 'Predicted 168h (µA)',
+      name: `Predicted 168h (${commonUnit})`,
       nameTextStyle: { color: '#94a3b8', padding: [0, 0, 0, 8] },
       min: lo,
       max: hi,
+      interval: step,
       axisLine: { show: false },
-      axisLabel: { color: '#94a3b8' },
+      axisLabel: {
+        color: '#94a3b8',
+        formatter: (value) => Number(value).toFixed(step < 1 ? 1 : 0),
+      },
       splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
     },
     series: [
@@ -477,14 +642,14 @@ function TabButton({ active, onClick, icon: Icon, label, count }) {
       {label}
       {count != null && (
         <span className="bg-slate-800 px-1.5 py-0.5 text-xs text-slate-300">
-          {count}
+          {count} records
         </span>
       )}
     </button>
   )
 }
 
-// Bouncing Dots Component for LLM generation loading state
+// Loading indicator
 function BouncingDots() {
   return (
     <div className="flex items-center justify-center space-x-2">
@@ -501,15 +666,13 @@ function ComponentRegistry({
   onToggleRow,
   loading,
   hasResults,
-  explanations,
-  rowLoading,
 }) {
   if (loading) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 py-20">
         <BouncingDots />
         <p className="text-sm font-medium text-amber-500/80 animate-pulse">
-          Generating LLM explanations & running anomaly models...
+          Running anomaly models and screening rules...
         </p>
       </div>
     )
@@ -560,19 +723,19 @@ function ComponentRegistry({
                 </TableCell>
                 <TableCell className="text-slate-300">{row.Lot}</TableCell>
                 <TableCell className="text-slate-300">
-                  {formatMicroamps(row.Value_0h)}
+                  {formatValue(row.Value_0h, row.parameter)}
                 </TableCell>
                 <TableCell className="text-slate-300">
-                  {formatMicroamps(row.Value_24h)}
+                  {formatValue(row.Value_24h, row.parameter)}
                 </TableCell>
                 <TableCell className="text-slate-300">
-                  {formatMicroamps(row.Value_96h)}
+                  {formatValue(row.Value_96h, row.parameter)}
                 </TableCell>
                 <TableCell className="text-slate-300">
-                  {formatMicroamps(row.Value_168h)}
+                  {formatValue(row.Value_168h, row.parameter)}
                 </TableCell>
                 <TableCell className="text-slate-300">
-                  {formatMicroamps(row.predicted_168h)}
+                  {formatValue(row.predicted_168h, row.parameter)}
                 </TableCell>
                 <TableCell className="text-slate-300">
                   {formatZScore(row.robust_z_score)}
@@ -590,18 +753,54 @@ function ComponentRegistry({
                         Explainability — {row.ComponentID}
                       </p>
 
-                      {rowLoading[rowKey] ? (
-                        <div className="flex items-center gap-3 py-2">
-                          <BouncingDots />
-                          <span className="text-sm text-amber-500/80">
-                            Analyzing component trajectory...
-                          </span>
+                      <div className="mb-3 flex items-center gap-2">
+                        {getStatusBadge(row)}
+                        <span className="text-xs text-slate-500">
+                          {humanizeParameter(row.parameter)}
+                        </span>
+                      </div>
+                      <p className="text-sm leading-relaxed text-slate-300">
+                        {row.justification}
+                      </p>
+                      {row.reason_codes.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {row.reason_codes.map((code) => (
+                            <Badge
+                              key={code}
+                              variant="outline"
+                              className="border-slate-700 bg-slate-900/70 text-slate-300"
+                            >
+                              {code}
+                            </Badge>
+                          ))}
                         </div>
-                      ) : (
-                        <p className="text-sm leading-relaxed text-slate-300">
-                          {explanations[rowKey] || 'No justification available.'}
-                        </p>
                       )}
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="border border-slate-800 bg-slate-900/40 p-2.5">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Isolation Forest</p>
+                          <p className="mt-1 text-sm text-slate-200">
+                            {formatZScore(row.isolation_forest_score)}
+                          </p>
+                        </div>
+                        <div className="border border-slate-800 bg-slate-900/40 p-2.5">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Predicted Drift</p>
+                          <p className="mt-1 text-sm text-slate-200">
+                            {formatValue(row.predicted_drift_rate, row.parameter, 4)} / h
+                          </p>
+                        </div>
+                        <div className="border border-slate-800 bg-slate-900/40 p-2.5">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Safety Slope</p>
+                          <p className="mt-1 text-sm text-slate-200">
+                            {formatValue(row.safety_slope, row.parameter, 4)} / h
+                          </p>
+                        </div>
+                        <div className="border border-slate-800 bg-slate-900/40 p-2.5">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Datasheet Limit</p>
+                          <p className="mt-1 text-sm text-slate-200">
+                            {formatLimit(row.datasheet_limit, row.parameter)}
+                          </p>
+                        </div>
+                      </div>
                     </div>
                   </TableCell>
                 </TableRow>
@@ -632,6 +831,82 @@ function JustificationPopover({ justification }) {
   )
 }
 
+function AccuracyMetricsTable({ rows, maeByParameter, filtered }) {
+  const grouped = useMemo(() => {
+    const groups = new Map()
+
+    rows.forEach((row) => {
+      if (!groups.has(row.parameter)) groups.set(row.parameter, [])
+      groups.get(row.parameter).push(row)
+    })
+
+    return [...groups.entries()]
+      .map(([parameter, parameterRows]) => {
+        const evaluated = parameterRows.filter(
+          (row) =>
+            row.predicted_168h != null &&
+            !Number.isNaN(Number(row.predicted_168h)) &&
+            !Number.isNaN(Number(row.Value_168h)),
+        )
+
+        const clientMae = computeMae(parameterRows)
+        const backendMae = toFiniteNumber(maeByParameter?.[parameter])
+        const mae = filtered ? clientMae : backendMae ?? clientMae
+        const flagged = parameterRows.filter(isFlagged).length
+
+        return {
+          parameter,
+          samples: evaluated.length,
+          records: parameterRows.length,
+          flagged,
+          mae,
+        }
+      })
+      .sort((a, b) => a.parameter.localeCompare(b.parameter))
+  }, [rows, maeByParameter, filtered])
+
+  if (grouped.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-500">
+        No accuracy metrics available for the current view.
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-full overflow-auto border border-slate-800 bg-slate-950/40">
+      <Table>
+        <TableHeader className="sticky top-0 z-10 bg-slate-900">
+          <TableRow className="border-slate-800 hover:bg-transparent">
+            <TableHead className="text-slate-400">Parameter</TableHead>
+            <TableHead className="text-slate-400">Evaluated Samples</TableHead>
+            <TableHead className="text-slate-400">MAE</TableHead>
+            <TableHead className="text-slate-400">Flagged</TableHead>
+            <TableHead className="text-slate-400">Records</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {grouped.map((item) => (
+            <TableRow key={item.parameter} className="border-slate-800">
+              <TableCell className="font-medium text-slate-200">
+                {humanizeParameter(item.parameter)}
+              </TableCell>
+              <TableCell className="text-slate-300">{item.samples}</TableCell>
+              <TableCell className="text-slate-200">
+                {item.mae != null
+                  ? `${item.mae.toFixed(2)} ${parameterUnit(item.parameter)}`
+                  : '—'}
+              </TableCell>
+              <TableCell className="text-slate-300">{item.flagged}</TableCell>
+              <TableCell className="text-slate-300">{item.records}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  )
+}
+
 export default function App() {
   const fileInputRef = useRef(null)
   const [results, setResults] = useState(null)
@@ -644,8 +919,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [fileName, setFileName] = useState(null)
-  const [explanations, setExplanations] = useState({})
-  const [rowLoading, setRowLoading] = useState({})
+  const [uploadedFile, setUploadedFile] = useState(null)
+  const analysisRequestRef = useRef(0)
   const [valueMode, setValueMode] = useState('percent') // 'raw' | 'percent' -- percent is the default: it's directly comparable across parameters with different absolute scales/limits
 
   const filteredRows = useMemo(() => {
@@ -696,6 +971,10 @@ export default function App() {
   }, [results, filteredRows, parameterFilter, lotFilter])
 
   const mae = useMemo(() => computeMae(filteredRows), [filteredRows])
+  const commonUnit = useMemo(() => getCommonUnit(filteredRows), [filteredRows])
+  const accuracyTableUsesFilteredMae = lotFilter !== 'all' || parameterFilter !== 'all'
+
+  const accuracyTableRows = useMemo(() => filteredRows, [filteredRows])
 
   const flaggedInView = useMemo(
     () => filteredRows.filter(isFlagged).length,
@@ -717,69 +996,76 @@ export default function App() {
     [filteredRows],
   )
 
-  const handleUpload = useCallback(async (event) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-
+  const analyzeFile = useCallback(async (file, nextRiskTolerance, nextDatasheetLimit) => {
+    const requestId = ++analysisRequestRef.current
     setLoading(true)
     setError(null)
-    setFileName(file.name)
-    setExpandedRowId(null)
-    setLotFilter('all')
-    setParameterFilter('all')
-    setResults(null) // Clear old results instantly while loading
-    setExplanations({}) // Cached explanations are keyed by row, so drop them on new data
-    setRowLoading({})
 
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('risk_tolerance', riskTolerance)
-    formData.append('datasheet_limit', datasheetLimit)
+    formData.append('risk_tolerance', String(nextRiskTolerance))
+    formData.append('datasheet_limit', String(nextDatasheetLimit))
 
     try {
       const { data } = await axios.post(API_URL, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
+
+      if (requestId !== analysisRequestRef.current) return
+
       setResults(parseApiResponse(data))
+      setExpandedRowId(null)
     } catch (err) {
+      if (requestId !== analysisRequestRef.current) return
+
       const message =
         err.response?.data?.detail ??
         err.message ??
-        'Failed to analyze CSV. Ensure the API is running on port 8000.'
+        'Failed to analyze CSV.'
       setError(message)
       setResults(null)
     } finally {
-      setLoading(false)
-      event.target.value = ''
+      if (requestId === analysisRequestRef.current) {
+        setLoading(false)
+      }
     }
-  }, [riskTolerance, datasheetLimit])
+  }, [])
 
-  const toggleRow = useCallback(async (rowKey, rowData) => {
-    setExpandedRowId((current) => (current === rowKey ? null : rowKey))
+  useEffect(() => {
+    if (!uploadedFile) return undefined
 
-    // If we already have the explanation, don't fetch it again
-    if (explanations[rowKey] || !rowData) return
-
-    setRowLoading((prev) => ({ ...prev, [rowKey]: true }))
-
-    try {
-      const response = await axios.post(
-        'http://127.0.0.1:8000/api/explain',
-        rowData,
+    const timeoutId = window.setTimeout(() => {
+      analyzeFile(
+        uploadedFile,
+        riskTolerance,
+        datasheetLimit,
       )
-      setExplanations((prev) => ({
-        ...prev,
-        [rowKey]: response.data.justification,
-      }))
-    } catch (err) {
-      setExplanations((prev) => ({
-        ...prev,
-        [rowKey]: 'Error generating explanation.',
-      }))
-    } finally {
-      setRowLoading((prev) => ({ ...prev, [rowKey]: false }))
-    }
-  }, [explanations])
+    }, 300)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [uploadedFile, riskTolerance, analyzeFile])
+
+  const handleUpload = useCallback((event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    analysisRequestRef.current += 1
+    setLoading(false)
+    setError(null)
+    setFileName(file.name)
+    setExpandedRowId(null)
+    setLotFilter('all')
+    setParameterFilter('all')
+    setResults(null)
+    setUploadedFile(file)
+    event.target.value = ''
+  }, [])
+
+  const toggleRow = useCallback((rowKey) => {
+    setExpandedRowId((current) => (
+      current === rowKey ? null : rowKey
+    ))
+  }, [])
 
   return (
     <div className="dark flex h-full flex-col overflow-hidden bg-slate-950 text-slate-100">
@@ -862,7 +1148,7 @@ export default function App() {
               </div>
               {activeParameterLimit != null && (
                 <p className="text-[11px] text-amber-400/80">
-                  Datasheet limit: {activeParameterLimit} µA
+                  Datasheet limit: {formatLimit(activeParameterLimit, parameterFilter)}
                 </p>
               )}
             </div>
@@ -872,7 +1158,7 @@ export default function App() {
                 htmlFor="datasheet-limit"
                 className="text-xs font-medium text-slate-400"
               >
-                Datasheet Limit (µA)
+                Datasheet Limit ({parameterFilter === 'all' ? 'native units' : parameterUnit(parameterFilter)})
               </label>
               <input
                 id="datasheet-limit"
@@ -969,7 +1255,7 @@ export default function App() {
             }
             description={
               activeParameterLimit != null
-                ? `${flaggedInView} flagged — vs. ${activeParameterLimit} µA limit (${humanizeParameter(parameterFilter)})`
+                ? `${flaggedInView} flagged — vs. ${formatLimit(activeParameterLimit, parameterFilter)} limit (${humanizeParameter(parameterFilter)})`
                 : `${flaggedInView} flagged — datasheet limit varies by parameter, select one to compare`
             }
             icon={AlertTriangle}
@@ -977,7 +1263,7 @@ export default function App() {
           />
           <SummaryCard
             title="Drift Prediction MAE"
-            value={mae != null ? `${mae.toFixed(2)} µA` : '—'}
+            value={mae != null ? `${mae.toFixed(2)} ${commonUnit}` : '—'}
             description="Mean absolute error between predicted and actual 168h values (Module B)"
             icon={Target}
             accent="bg-amber-500/15 text-amber-300"
@@ -1026,8 +1312,7 @@ export default function App() {
                     ) : (
                       <>
                         Faint slate traces for passing components; bold
-                        red/amber for flagged items. Dashed segments show
-                        Module B predicted 168h from the 96h measurement.
+                        red/amber for flagged items. Dashed segments show Module B predicted 168h using only 0h/24h measurements.
                       </>
                     )}
                   </CardDescription>
@@ -1062,15 +1347,14 @@ export default function App() {
                   <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-4 border border-dashed border-slate-800 bg-slate-950/50">
                     <BouncingDots />
                     <p className="text-sm font-medium text-amber-500/80 animate-pulse">
-                      Generating LLM explanations & running anomaly models...
+                      Running anomaly models and screening rules...
                     </p>
                   </div>
                 ) : !results ? (
                   <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 border border-dashed border-slate-800 bg-slate-950/50 text-slate-500">
                     <Upload className="size-8 opacity-40" />
                     <p className="text-sm">
-                      Upload a burn-in CSV to visualize leakage-current
-                      trajectories
+                      Upload a burn-in CSV to visualize parameter trajectories
                     </p>
                   </div>
                 ) : (
@@ -1090,11 +1374,9 @@ export default function App() {
                   Predicted vs. Actual 168h (Module B)
                 </CardTitle>
                 <CardDescription className="text-slate-400">
-                  Each point is one component. Distance from the dashed
-                  diagonal is the prediction error — points above the line are
-                  over-predicted, below are under-predicted. Flagged
-                  components are colored red/amber; passing components are
-                  faint slate.
+                  Each point is one parametric record. Distance from the dashed
+                  diagonal is the prediction error. Hover a point for its status,
+                  reason, and deterministic justification.
                 </CardDescription>
               </CardHeader>
               <CardContent className="min-h-0 flex-1 pb-4">
@@ -1102,24 +1384,34 @@ export default function App() {
                   <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-4 border border-dashed border-slate-800 bg-slate-950/50">
                     <BouncingDots />
                     <p className="text-sm font-medium text-amber-500/80 animate-pulse">
-                      Generating LLM explanations & running anomaly models...
+                      Running anomaly models and screening rules...
                     </p>
                   </div>
                 ) : !results ? (
                   <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 border border-dashed border-slate-800 bg-slate-950/50 text-slate-500">
                     <Crosshair className="size-8 opacity-40" />
                     <p className="text-sm">
-                      Upload a burn-in CSV to compare predicted vs. actual
-                      168h values
+                      Upload a burn-in CSV to compare predicted vs. actual 168h values
                     </p>
                   </div>
                 ) : (
-                  <ReactECharts
-                    option={parityOption}
-                    style={{ height: '100%', width: '100%' }}
-                    notMerge
-                    lazyUpdate
-                  />
+                  <div className="flex h-full min-h-0 flex-col gap-3">
+                    <div className="min-h-[330px] h-[56%] shrink-0">
+                      <ReactECharts
+                        option={parityOption}
+                        style={{ height: '100%', width: '100%' }}
+                        notMerge
+                        lazyUpdate
+                      />
+                    </div>
+                    <div className="min-h-0 flex-1">
+                      <AccuracyMetricsTable
+                        rows={accuracyTableRows}
+                        maeByParameter={results.mae_by_parameter}
+                        filtered={accuracyTableUsesFilteredMae}
+                      />
+                    </div>
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -1140,14 +1432,12 @@ export default function App() {
               <CardContent className="min-h-0 flex-1 overflow-hidden pb-4">
                 <div className="h-full overflow-auto border border-slate-800 bg-slate-950/40">
                   <ComponentRegistry
-                    key={lotFilter}
+                    key={`${lotFilter}-${parameterFilter}`}
                     rows={filteredRows}
                     expandedRowId={expandedRowId}
                     onToggleRow={toggleRow}
                     loading={loading}
                     hasResults={!!results}
-                    explanations={explanations}
-                    rowLoading={rowLoading}
                   />
                 </div>
               </CardContent>

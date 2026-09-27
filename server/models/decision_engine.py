@@ -1,6 +1,13 @@
 import pandas as pd
 
-def evaluate_component(current_val, predicted_val, is_anomaly, safety_slope_exceeded, datasheet_limit):
+def evaluate_component(
+    current_val,
+    predicted_val,
+    is_if_anomaly,
+    is_lot_outlier,
+    safety_slope_exceeded,
+    datasheet_limit
+):
     """
     Evaluates a single component's risk profile based on absolute limits,
     predictive drift, and statistical outliers.
@@ -10,7 +17,10 @@ def evaluate_component(current_val, predicted_val, is_anomaly, safety_slope_exce
     if current_val > datasheet_limit:
         reason_codes.append("ABSOLUTE_LIMIT_EXCEEDED")
     
-    if is_anomaly:
+    if is_if_anomaly:
+        reason_codes.append("ML_ANOMALY_SCORE")
+
+    if is_lot_outlier:
         reason_codes.append("LOT_RELATIVE_OUTLIER")
         
     if pd.notna(predicted_val) and predicted_val > datasheet_limit:
@@ -21,7 +31,10 @@ def evaluate_component(current_val, predicted_val, is_anomaly, safety_slope_exce
         
     if any(code in reason_codes for code in ["ABSOLUTE_LIMIT_EXCEEDED", "PREDICTED_LIMIT_BREACH", "SAFETY_SLOPE_EXCEEDED"]):
         status = "REJECT"
-    elif "LOT_RELATIVE_OUTLIER" in reason_codes:
+    elif (
+    "ML_ANOMALY_SCORE" in reason_codes
+    or "LOT_RELATIVE_OUTLIER" in reason_codes
+    ):
         status = "WATCH"
     else:
         status = "PASS"
@@ -46,7 +59,8 @@ def apply_decision_engine(df: pd.DataFrame) -> pd.DataFrame:
         status, is_flagged, reason_codes = evaluate_component(
             current_val=current_val,
             predicted_val=row.get("predicted_168h", 0),
-            is_anomaly=row.get("is_anomaly", False),
+            is_if_anomaly=row.get("is_if_anomaly", False),
+            is_lot_outlier=row.get("is_lot_outlier", False),
             safety_slope_exceeded=row.get("safety_slope_exceeded", False),
             datasheet_limit=row.get("datasheet_limit", 50.0)
         )

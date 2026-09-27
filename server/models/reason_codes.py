@@ -5,6 +5,7 @@ REASON_MESSAGES = {
     "PREDICTED_LIMIT_BREACH": "Predicted 168h value exceeds the datasheet limit.",
     "SAFETY_SLOPE_EXCEEDED": "Predicted drift exceeds the calibrated safety slope.",
     "ABSOLUTE_LIMIT_EXCEEDED": "Measured value exceeds the datasheet limit.",
+    "ML_ANOMALY_SCORE": "The machine-learning anomaly model identified an unusual measurement pattern.",
 }
 
 def get_reason_message(code: str) -> str:
