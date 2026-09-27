@@ -30,6 +30,7 @@ def predict_168h(df, threshold=3.5, tier_col="datasheet_limit"):
     feat = engineer_features(feat_df, include_168h=False)
     X_drift = feat[DRIFT_MODEL_FEATURES].to_numpy(dtype=np.float32, copy=True)
 
+    # Removed the zeroing-out loop. The ONNX model requires true inputs to prevent high MAE.
     X_drift = np.nan_to_num(X_drift, nan=0.0, posinf=0.0, neginf=0.0)
 
     preds = _session().run(None, {"input": X_drift})[0]
@@ -45,6 +46,11 @@ def predict_168h(df, threshold=3.5, tier_col="datasheet_limit"):
     lot_col = "lot_id" if "lot_id" in out_df.columns else None
     param_col = "parameter" if "parameter" in out_df.columns else None
 
+    # FIX: group by (lot, device tier) instead of (lot, parameter). `parameter`
+    # is constant here, so grouping by it alone collapses to lot-only, which
+    # mixes several device tiers (different datasheet_limit populations, very
+    # different absolute scales) under one lot_id -- see outlier_detection.py
+    # for the full explanation, the bug is identical here.
     if lot_col and tier_col in out_df.columns:
         group_keys = [lot_col, tier_col]
     elif lot_col and param_col:
@@ -58,6 +64,12 @@ def predict_168h(df, threshold=3.5, tier_col="datasheet_limit"):
         idx = group.index
         rates = group["predicted_drift_rate"].astype(float)
 
+        # FIX: static median/MAD over the whole group instead of .expanding().
+        # Expanding is a cumulative/online stat -- the safety slope for a row
+        # depended on how many rows of its group came before it in the
+        # dataframe, not on the group's actual spread. That gave inconsistent,
+        # order-dependent thresholds and let a lot of legitimate parts trip
+        # "safety_slope_exceeded" simply because they were early in the file.
         median = float(rates.median())
         mad = float(np.median(np.abs(rates - median)))
         mad = max(mad, 1e-6)

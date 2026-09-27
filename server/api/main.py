@@ -6,10 +6,11 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi import Request
+from models.explainability import generate_single_justification
 
+# Ensure the parent directory is in the path for model imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.explainability import generate_single_justification
 from models.pipeline import run_screening
 from models.drift_predictor import predict_168h
 
@@ -53,20 +54,20 @@ async def detect_anomaly_endpoint(
     """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
-
+    
     try:
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
-
+        
         # Execute the end-to-end multi-gate screening pipeline
         result = run_screening(
-            df=df,
-            datasheet_limit=datasheet_limit,
+            df=df, 
+            datasheet_limit=datasheet_limit, 
             risk_tolerance=risk_tolerance
         )
-
+        
         return JSONResponse(content=result)
-
+    
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
@@ -80,21 +81,21 @@ async def predict_drift_endpoint(file: UploadFile = File(...)):
     """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
-
+    
     try:
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
-
+        
         req_cols = ['value_0h', 'value_24h', 'value_96h', 'parameter']
         missing = [c for c in req_cols if c not in df.columns]
         if missing:
              raise ValueError(f"Missing required columns: {missing}")
-
+        
         # Run standalone drift prediction
         result_df = predict_168h(df)
-
+        
         return JSONResponse(content=result_df.to_dict(orient="records"))
-
+    
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
