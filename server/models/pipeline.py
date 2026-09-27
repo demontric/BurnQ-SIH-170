@@ -9,6 +9,7 @@ from models.drift_predictor import predict_168h
 from models.safety_slope import calculate_safety_slope
 from models.model_registry import normalize_parameter
 from models.decision_engine import apply_decision_engine
+from models.explainability import apply_explainability
 
 COLUMN_ALIASES = {
     "ComponentID": "part_id", "component_id": "part_id", "PartID": "part_id",
@@ -84,13 +85,16 @@ def run_screening(df: pd.DataFrame, datasheet_limit=None, risk_tolerance=50.0) -
     screened_gate3 = detect_anomalies(screened_gate2, threshold=z_threshold, risk_tolerance=risk_tolerance)
 
     # 5) Phase 5: Decision Engine Processing
-    screened = apply_decision_engine(screened_gate3)
+    screened_gate4 = apply_decision_engine(screened_gate3)
+
+    # 6) Phase 8: Deterministic Explainability
+    screened = apply_explainability(screened_gate4)
 
     payload_cols = [
         "part_id", "lot_id", "parameter", "value_0h", "value_24h", "value_96h", "value_168h",
         "predicted_168h", "robust_z_score", "isolation_forest_score", "is_anomaly",
-        "safety_slope_exceeded", "status", "reason_codes", "is_flagged", "datasheet_limit",
-        "predicted_drift_rate", "safety_slope"
+        "safety_slope_exceeded", "status", "reason_codes", "justification", "is_flagged", 
+        "datasheet_limit", "predicted_drift_rate", "safety_slope"
     ]
     
     data = screened[[c for c in payload_cols if c in screened.columns]].rename(
