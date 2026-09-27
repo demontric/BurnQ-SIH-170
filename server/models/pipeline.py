@@ -63,15 +63,9 @@ def run_screening(df: pd.DataFrame, datasheet_limit=None, risk_tolerance=50.0) -
     # Gate 1: Predict 168h using 0h/24h features
     screened_gate1 = predict_168h(raw, threshold=z_threshold)
 
-    # Gate 2: Detect 96h late-bloomer anomalies
-    # risk_tolerance is passed through explicitly (not just the derived
-    # z_threshold) so the isolation-forest gate responds to the slider too --
-    # see the fix in models/outlier_detection.py.
     screened = detect_anomalies(screened_gate1, threshold=z_threshold, risk_tolerance=risk_tolerance)
 
-    # Justifications are no longer generated synchronously here; the initial
-    # upload returns null so the response is fast. Justifications can be
-    # generated later (e.g. on-demand or in a background job).
+   
     screened["justification"] = None
     screened["is_flagged"] = screened["is_anomaly"].astype(bool) | screened["safety_slope_exceeded"].astype(bool)
 
@@ -93,7 +87,13 @@ def run_screening(df: pd.DataFrame, datasheet_limit=None, risk_tolerance=50.0) -
     )
 
     records = records_to_json(data)
+    
+    component_count = int(screened["part_id"].nunique()) if "part_id" in screened.columns else len(records)
     return {
+        "components": component_count,
+        "parametric_records": len(records),
+        # Kept for any older frontend code still reading this key; always
+        # equal to parametric_records, never the physical component count.
         "total_components": len(records),
         "flagged_count": int(sum(1 for row in records if row.get("is_flagged"))),
         "mae": mae,

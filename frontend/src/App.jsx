@@ -45,11 +45,23 @@ function lotKey(value) {
   return String(value).trim()
 }
 
+function humanizeParameter(value) {
+  if (!value) return 'Unknown'
+  const SPECIAL = { iddq: 'IDDQ', prop_delay: 'Propagation Delay', propagation_delay: 'Propagation Delay' }
+  const key = String(value).toLowerCase()
+  if (SPECIAL[key]) return SPECIAL[key]
+  return String(value)
+    .split(/[_\s]+/)
+    .map((word) => SPECIAL[word.toLowerCase()] ?? word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
 function normalizeRow(row) {
   return {
     ComponentID:
       row.ComponentID ?? row.component_id ?? row.part_id ?? row.PartID ?? '—',
     Lot: lotKey(row.Lot ?? row.lot_id ?? row.lot),
+    parameter: row.parameter ?? row.Parameter ?? 'unknown',
     Value_0h: Number(row.Value_0h ?? row.value_0h ?? 0),
     Value_24h: Number(row.Value_24h ?? row.value_24h ?? 0),
     Value_96h: Number(row.Value_96h ?? row.value_96h ?? 0),
@@ -85,7 +97,12 @@ function parseApiResponse(payload) {
     payload?.flagged_count ?? data.filter(isFlagged).length
 
   return {
-    total_components: payload?.total_components ?? data.length,
+    // Physical component count (unique part_id) vs. parametric row count --
+    // these differ whenever a component has more than one measured
+    // parameter. Fall back gracefully for an older backend response shape.
+    components: payload?.components ?? payload?.total_components ?? data.length,
+    parametric_records:
+      payload?.parametric_records ?? payload?.total_components ?? data.length,
     flagged_count,
     data,
   }
@@ -154,14 +171,17 @@ function getFlaggedColor(row) {
   return '#94a3b8'
 }
 
-function buildChartOption(rows, datasheetLimit, mode = 'raw') {
+function buildChartOption(rows, mode = 'raw', activeLimit = null) {
   const series = []
   const legendEntries = []
   const isPercent = mode === 'percent'
 
   const scaleFor = (row) => {
     if (!isPercent) return 1
-    const limit = row.datasheet_limit ?? datasheetLimit
+    // Always scale by THIS row's own datasheet limit -- rows can span
+    // multiple parameters (leakage current, IDDQ, propagation delay, ...)
+    // with very different absolute scales and limits, even in one view.
+    const limit = row.datasheet_limit ?? activeLimit
     return limit > 0 ? 100 / limit : 1
   }
 
@@ -218,9 +238,16 @@ function buildChartOption(rows, datasheetLimit, mode = 'raw') {
     if (flagged) legendEntries.push(row.ComponentID)
   })
 
+  // In raw µA mode, a single flat reference line is only meaningful when
+  // every visible row shares one datasheet limit (i.e. one parameter is
+  // selected). With "All Parameters" selected, limits can differ by 30x --
+  // drawing one flat line would misrepresent most of what's on screen, so
+  // skip it entirely rather than show a misleading number.
   const limitLine = isPercent
     ? { value: 100, label: 'Datasheet Limit (100%)' }
-    : { value: datasheetLimit, label: `Datasheet Limit (${datasheetLimit} µA)` }
+    : activeLimit != null
+      ? { value: activeLimit, label: `Datasheet Limit (${activeLimit} µA)` }
+      : null
 
   return {
     backgroundColor: 'transparent',
@@ -271,22 +298,26 @@ function buildChartOption(rows, datasheetLimit, mode = 'raw') {
     },
     series: [
       ...series,
-      {
-        name: 'Datasheet Limit',
-        type: 'line',
-        data: [],
-        markLine: {
-          silent: true,
-          symbol: 'none',
-          lineStyle: { color: '#fb923c', type: 'dotted', width: 2 },
-          label: {
-            formatter: limitLine.label,
-            color: '#fdba74',
-            position: 'insideEndTop',
-          },
-          data: [{ yAxis: limitLine.value }],
-        },
-      },
+      ...(limitLine
+        ? [
+            {
+              name: 'Datasheet Limit',
+              type: 'line',
+              data: [],
+              markLine: {
+                silent: true,
+                symbol: 'none',
+                lineStyle: { color: '#fb923c', type: 'dotted', width: 2 },
+                label: {
+                  formatter: limitLine.label,
+                  color: '#fdba74',
+                  position: 'insideEndTop',
+                },
+                data: [{ yAxis: limitLine.value }],
+              },
+            },
+          ]
+        : []),
     ],
   }
 }
@@ -605,6 +636,7 @@ export default function App() {
   const fileInputRef = useRef(null)
   const [results, setResults] = useState(null)
   const [lotFilter, setLotFilter] = useState('all')
+  const [parameterFilter, setParameterFilter] = useState('all')
   const [datasheetLimit, setDatasheetLimit] = useState(50)
   const [riskTolerance, setRiskTolerance] = useState(50)
   const [activeTab, setActiveTab] = useState('visualizer')
@@ -614,14 +646,16 @@ export default function App() {
   const [fileName, setFileName] = useState(null)
   const [explanations, setExplanations] = useState({})
   const [rowLoading, setRowLoading] = useState({})
-  const [valueMode, setValueMode] = useState('raw') // 'raw' | 'percent'
+  const [valueMode, setValueMode] = useState('percent') // 'raw' | 'percent' -- percent is the default: it's directly comparable across parameters with different absolute scales/limits
 
   const filteredRows = useMemo(() => {
     if (!results?.data) return []
-    if (lotFilter === 'all') return results.data
-    const selectedLot = lotKey(lotFilter)
-    return results.data.filter((row) => lotKey(row.Lot) === selectedLot)
-  }, [results, lotFilter])
+    return results.data.filter((row) => {
+      const lotMatch = lotFilter === 'all' || lotKey(row.Lot) === lotKey(lotFilter)
+      const paramMatch = parameterFilter === 'all' || row.parameter === parameterFilter
+      return lotMatch && paramMatch
+    })
+  }, [results, lotFilter, parameterFilter])
 
   const lots = useMemo(() => {
     if (!results?.data) return []
@@ -629,6 +663,37 @@ export default function App() {
       .filter((lot) => lot && lot !== '—')
       .sort()
   }, [results])
+
+  const parameters = useMemo(() => {
+    if (!results?.data) return []
+    return [...new Set(results.data.map((row) => row.parameter))]
+      .filter(Boolean)
+      .sort()
+  }, [results])
+
+  // The datasheet limit to show as a single reference line/label: only
+  // meaningful when the visible rows share one parameter (and therefore,
+  // in practice, one limit). Take the first row's value rather than
+  // assuming -- if rows disagree (shouldn't happen for one parameter, but
+  // don't take it on faith), fall back to none rather than guess.
+  const activeParameterLimit = useMemo(() => {
+    if (parameterFilter === 'all' || filteredRows.length === 0) return null
+    const limits = new Set(
+      filteredRows.map((row) => row.datasheet_limit).filter((v) => v != null),
+    )
+    return limits.size === 1 ? [...limits][0] : null
+  }, [filteredRows, parameterFilter])
+
+  const componentCount = useMemo(() => {
+    if (!results) return null
+    if (parameterFilter === 'all' && lotFilter === 'all') {
+      return results.components ?? new Set(filteredRows.map((r) => r.ComponentID)).size
+    }
+    // Filtered view: components can repeat across parameter rows, so count
+    // distinct ComponentIDs actually in view rather than reusing the
+    // unfiltered backend total.
+    return new Set(filteredRows.map((r) => r.ComponentID)).size
+  }, [results, filteredRows, parameterFilter, lotFilter])
 
   const mae = useMemo(() => computeMae(filteredRows), [filteredRows])
 
@@ -643,8 +708,8 @@ export default function App() {
   }, [filteredRows.length, flaggedInView])
 
   const chartOption = useMemo(
-    () => buildChartOption(filteredRows, datasheetLimit, valueMode),
-    [filteredRows, datasheetLimit, valueMode],
+    () => buildChartOption(filteredRows, valueMode, activeParameterLimit),
+    [filteredRows, valueMode, activeParameterLimit],
   )
 
   const parityOption = useMemo(
@@ -661,6 +726,7 @@ export default function App() {
     setFileName(file.name)
     setExpandedRowId(null)
     setLotFilter('all')
+    setParameterFilter('all')
     setResults(null) // Clear old results instantly while loading
     setExplanations({}) // Cached explanations are keyed by row, so drop them on new data
     setRowLoading({})
@@ -769,6 +835,40 @@ export default function App() {
 
             <div className="space-y-1">
               <label
+                htmlFor="parameter-filter"
+                className="text-xs font-medium text-slate-400"
+              >
+                Parameter
+              </label>
+              <div className="relative">
+                <select
+                  id="parameter-filter"
+                  value={parameterFilter}
+                  onChange={(e) => {
+                    setParameterFilter(e.target.value)
+                    setExpandedRowId(null)
+                  }}
+                  disabled={!results}
+                  className="h-9 min-w-[160px] appearance-none border border-slate-700 bg-slate-900 pr-8 pl-3 text-sm text-slate-200 outline-none focus:border-amber-500/60 focus:ring-2 focus:ring-amber-500/20 disabled:opacity-50"
+                >
+                  <option value="all">All Parameters</option>
+                  {parameters.map((param) => (
+                    <option key={param} value={param}>
+                      {humanizeParameter(param)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute top-1/2 right-2 size-4 -translate-y-1/2 text-slate-500" />
+              </div>
+              {activeParameterLimit != null && (
+                <p className="text-[11px] text-amber-400/80">
+                  Datasheet limit: {activeParameterLimit} µA
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label
                 htmlFor="datasheet-limit"
                 className="text-xs font-medium text-slate-400"
               >
@@ -852,9 +952,13 @@ export default function App() {
         {/* Summary Cards */}
         <section className="grid shrink-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           <SummaryCard
-            title="Total Components"
-            value={results ? filteredRows.length : '—'}
-            description="Screened parametric burn-in trajectories in current view"
+            title="Components"
+            value={componentCount ?? '—'}
+            description={
+              results
+                ? `${filteredRows.length} parametric record${filteredRows.length === 1 ? '' : 's'} in current view`
+                : 'Screened physical parts (unique component IDs)'
+            }
             icon={Activity}
             accent="bg-sky-500/15 text-sky-300"
           />
@@ -863,7 +967,11 @@ export default function App() {
             value={
               flaggedRate != null ? `${flaggedRate.toFixed(1)}%` : '—'
             }
-            description={`${flaggedInView} flagged — monitor false negatives vs. static ${datasheetLimit} µA limit`}
+            description={
+              activeParameterLimit != null
+                ? `${flaggedInView} flagged — vs. ${activeParameterLimit} µA limit (${humanizeParameter(parameterFilter)})`
+                : `${flaggedInView} flagged — datasheet limit varies by parameter, select one to compare`
+            }
             icon={AlertTriangle}
             accent="bg-red-500/15 text-red-300"
           />
@@ -1022,9 +1130,11 @@ export default function App() {
                   Component Registry
                 </CardTitle>
                 <CardDescription className="text-slate-400">
-                  {lotFilter === 'all'
-                    ? 'All lots. Click a row to expand the model justification.'
-                    : `Filtered to lot ${lotFilter} — ${filteredRows.length} component${filteredRows.length === 1 ? '' : 's'}.`}
+                  {lotFilter === 'all' && parameterFilter === 'all'
+                    ? 'All lots, all parameters. Click a row to expand the model justification.'
+                    : `${lotFilter === 'all' ? 'All lots' : `Lot ${lotFilter}`} · ${
+                        parameterFilter === 'all' ? 'all parameters' : humanizeParameter(parameterFilter)
+                      } — ${filteredRows.length} record${filteredRows.length === 1 ? '' : 's'} (${componentCount} component${componentCount === 1 ? '' : 's'}).`}
                 </CardDescription>
               </CardHeader>
               <CardContent className="min-h-0 flex-1 overflow-hidden pb-4">
