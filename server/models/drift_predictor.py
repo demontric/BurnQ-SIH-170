@@ -1,503 +1,298 @@
-"""
-End-to-end burn-in screening pipeline.
-
-Pipeline stages:
-
-    Input normalization
-        ↓
-    Module B — 168h drift prediction
-        ↓
-    Evaluation / MAE
-        ↓
-    Safety slope
-        ↓
-    Module A — anomaly detection
-        ↓
-    Decision engine
-        ↓
-    Deterministic explainability
-        ↓
-    JSON-ready response
-"""
-
-import math
-
 import numpy as np
-import pandas as pd
 
-from models.outlier_detection import detect_anomalies
-from models.drift_predictor import predict_168h
-from models.safety_slope import calculate_safety_slope
-from models.model_registry import normalize_parameter
-from models.decision_engine import apply_decision_engine
-from models.explainability import apply_explainability
+from preprocessing.features import engineer_features, EARLY_DRIFT_FEATURES
+from models.model_registry import get_drift_model, normalize_parameter
 
 
-# -------------------------------------------------------------
-# Input column aliases
-# -------------------------------------------------------------
-
-COLUMN_ALIASES = {
-    "ComponentID": "part_id",
-    "component_id": "part_id",
-    "PartID": "part_id",
-
-    "Lot": "lot_id",
-    "lot": "lot_id",
-
-    "Value_0h": "value_0h",
-    "Value_24h": "value_24h",
-    "Value_96h": "value_96h",
-    "Value_168h": "value_168h",
-
-    "datasheet_limit_uA": "datasheet_limit",
-}
-
-
-# -------------------------------------------------------------
-# Required screening columns
-#
-# Module A requires measurements through 96h.
-# 168h is required here because this pipeline also evaluates
-# the prediction against the actual 168h value.
-# -------------------------------------------------------------
-
-REQUIRED_COLUMNS = [
-    "lot_id",
-    "parameter",
-    "value_0h",
-    "value_24h",
+_FUTURE_VALUE_COLS = (
     "value_96h",
     "value_168h",
-]
+    "Value_96h",
+    "Value_168h",
+)
 
 
-# -------------------------------------------------------------
-# JSON serialization helpers
-# -------------------------------------------------------------
-
-def _to_python(value):
+def _onnx_matches_early_contract(session) -> bool:
     """
-    Convert NumPy/Pandas values into JSON-safe Python values.
+    Verify that the ONNX model expects the frozen Module B feature count.
+
+    Module B must use only the 0h / 24h feature contract.
     """
+    inputs = session.get_inputs()
 
-    if value is None:
-        return None
+    if not inputs:
+        return False
 
-    if pd.isna(value):
-        return None
+    shape = inputs[0].shape
 
-    if isinstance(value, np.bool_):
-        return bool(value)
+    if len(shape) < 2:
+        return False
 
-    if isinstance(value, np.integer):
-        return int(value)
+    feature_dim = shape[1]
 
-    if isinstance(value, (np.floating, float)):
+    # Dynamic feature dimension.
+    if feature_dim is None:
+        return True
 
-        if math.isnan(value) or math.isinf(value):
-            return None
-
-        return float(value)
-
-    if isinstance(value, pd.Timestamp):
-        return str(value)
-
-    if isinstance(value, list):
-        return [
-            _to_python(v)
-            for v in value
-        ]
-
-    return value
+    try:
+        return int(feature_dim) == len(EARLY_DRIFT_FEATURES)
+    except (TypeError, ValueError):
+        return False
 
 
-def records_to_json(df: pd.DataFrame) -> list:
+def _extrapolate_168h(feat, tau=40.0):
     """
-    Convert a dataframe into JSON-safe record dictionaries.
+    Temporary deterministic fallback forecast using only 0h and 24h.
+
+    Used until a compatible parameter-specific ONNX model is available.
+
+    V(t) = V0 + a * (1 - exp(-t / tau))
     """
 
-    return [
-        {
-            key: _to_python(value)
-            for key, value in row.items()
-        }
-        for row in df.to_dict(
-            orient="records"
+    v0 = feat["Value_0h"].to_numpy(dtype=np.float64)
+    v24 = feat["Value_24h"].to_numpy(dtype=np.float64)
+
+    denom = 1.0 - np.exp(-24.0 / tau)
+
+    if abs(denom) < 1e-12:
+        denom = 1e-12
+
+    a = (v24 - v0) / denom
+
+    prediction = (
+        v0
+        + a * (1.0 - np.exp(-168.0 / tau))
+    )
+
+    return prediction
+
+
+def _predict_group(feat_group, parameter):
+    """
+    Predict 168h values for one parameter group.
+
+    Uses the parameter-specific ONNX model when its input contract
+    matches the frozen Module B feature contract. Otherwise uses
+    the deterministic 0h/24h fallback.
+    """
+
+    sess = get_drift_model(parameter)
+
+    if sess is None:
+        return np.asarray(
+            _extrapolate_168h(feat_group),
+            dtype=float,
         )
-    ]
 
+    if not _onnx_matches_early_contract(sess):
+        return np.asarray(
+            _extrapolate_168h(feat_group),
+            dtype=float,
+        )
 
-# -------------------------------------------------------------
-# Input normalization
-# -------------------------------------------------------------
-
-def normalize_input(
-    df: pd.DataFrame,
-    datasheet_limit=None,
-) -> pd.DataFrame:
-
-    out = df.copy()
-
-    # Normalize whitespace around column names.
-    out.columns = [
-        str(column).strip()
-        for column in out.columns
-    ]
-
-    # Apply known aliases.
-    out = out.rename(
-        columns={
-            source: target
-            for source, target
-            in COLUMN_ALIASES.items()
-            if source in out.columns
-        }
+    X_drift = feat_group[
+        EARLY_DRIFT_FEATURES
+    ].to_numpy(
+        dtype=np.float32,
+        copy=True,
     )
 
-    # ---------------------------------------------------------
-    # Default parameter
-    # ---------------------------------------------------------
-
-    if "parameter" not in out.columns:
-        out["parameter"] = "leakage_current"
-
-    out["parameter"] = (
-        out["parameter"]
-        .map(normalize_parameter)
+    X_drift = np.nan_to_num(
+        X_drift,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
     )
 
-    # ---------------------------------------------------------
-    # Default component ID
-    # ---------------------------------------------------------
+    inputs = sess.get_inputs()
 
-    if "part_id" not in out.columns:
+    if not inputs:
+        raise ValueError(
+            f"Drift model for '{parameter}' has no input tensors."
+        )
 
-        out["part_id"] = [
-            f"C_{i:04d}"
-            for i in range(len(out))
-        ]
+    input_name = inputs[0].name
 
-    # ---------------------------------------------------------
-    # Validate required columns
-    # ---------------------------------------------------------
+    outputs = sess.run(
+        None,
+        {
+            input_name: X_drift
+        },
+    )
+
+    if not outputs:
+        raise ValueError(
+            f"Drift model for '{parameter}' returned no outputs."
+        )
+
+    preds = np.asarray(outputs[0])
+
+    if preds.size == 0:
+        raise ValueError(
+            f"Drift model for '{parameter}' returned an empty prediction."
+        )
+
+    # Expected output:
+    #   (N,)
+    # or
+    #   (N, 1)
+    if preds.ndim == 1:
+        pass
+
+    elif preds.ndim == 2 and preds.shape[1] == 1:
+        preds = preds.reshape(-1)
+
+    else:
+        raise ValueError(
+            f"Drift model for '{parameter}' returned unexpected "
+            f"prediction shape {preds.shape}. "
+            f"Expected (N,) or (N,1)."
+        )
+
+    try:
+        preds = preds.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Drift model for '{parameter}' returned non-numeric predictions."
+        ) from exc
+
+    if len(preds) != len(feat_group):
+        raise ValueError(
+            f"Drift model for '{parameter}' returned "
+            f"{len(preds)} predictions for "
+            f"{len(feat_group)} rows."
+        )
+
+    return preds
+
+
+def predict_168h(df):
+    """
+    Predict 168h from the frozen Module B contract.
+
+    IMPORTANT:
+    96h and 168h measurements are removed from the prediction features.
+    The actual 168h value is retained only for downstream evaluation.
+    """
+
+    out_df = df.copy()
+
+    rename_mapping = {
+        "lot_id": "Lot"
+    }
+
+    for col in (
+        "value_0h",
+        "value_24h",
+    ):
+        if col in out_df.columns:
+            rename_mapping[col] = col.replace(
+                "value_",
+                "Value_",
+            )
+
+    if (
+        "datasheet_limit" in out_df.columns
+        and "datasheet_limit_uA" not in out_df.columns
+    ):
+        rename_mapping[
+            "datasheet_limit"
+        ] = "datasheet_limit_uA"
+
+    feat_df = out_df.rename(
+        columns=rename_mapping
+    )
+
+    # Strictly prevent future measurements from entering Module B.
+    feat_df = feat_df.drop(
+        columns=[
+            c
+            for c in _FUTURE_VALUE_COLS
+            if c in feat_df.columns
+        ],
+        errors="ignore",
+    )
+
+    if "datasheet_limit_uA" not in feat_df.columns:
+        feat_df["datasheet_limit_uA"] = 50.0
+
+    if "parameter" in out_df.columns:
+        out_df["parameter"] = (
+            out_df["parameter"]
+            .map(normalize_parameter)
+        )
+
+        feat_df["parameter"] = (
+            out_df["parameter"].values
+        )
+
+    feat = engineer_features(
+        feat_df,
+        include_168h=False,
+        include_96h=False,
+    )
 
     missing = [
-        column
-        for column in REQUIRED_COLUMNS
-        if column not in out.columns
+        feature
+        for feature in EARLY_DRIFT_FEATURES
+        if feature not in feat.columns
     ]
 
     if missing:
         raise ValueError(
-            f"Missing required columns: {missing}"
+            f"Module B missing frozen features: {missing}"
         )
 
-    # ---------------------------------------------------------
-    # Numeric conversion
-    # ---------------------------------------------------------
+    out_df["predicted_168h"] = np.nan
 
-    numeric_columns = [
-        "value_0h",
-        "value_24h",
-        "value_96h",
-        "value_168h",
-        "datasheet_limit",
-    ]
-
-    for column in numeric_columns:
-
-        if column in out.columns:
-
-            out[column] = pd.to_numeric(
-                out[column],
-                errors="coerce",
-            )
-
-    # ---------------------------------------------------------
-    # Datasheet limit
-    # ---------------------------------------------------------
-
-    if "datasheet_limit" not in out.columns:
-
-        out["datasheet_limit"] = (
-            float(datasheet_limit)
-            if datasheet_limit is not None
-            else 50.0
-        )
-
-    else:
-
-        default_limit = (
-            float(datasheet_limit)
-            if datasheet_limit is not None
-            else 50.0
-        )
-
-        out["datasheet_limit"] = (
-            out["datasheet_limit"]
-            .fillna(default_limit)
-        )
-
-    return out
-
-
-# -------------------------------------------------------------
-# Main screening pipeline
-# -------------------------------------------------------------
-
-def run_screening(
-    df: pd.DataFrame,
-    datasheet_limit=None,
-    risk_tolerance=50.0,
-) -> dict:
-
-    # ---------------------------------------------------------
-    # 0. Normalize input
-    # ---------------------------------------------------------
-
-    raw = normalize_input(
-        df,
-        datasheet_limit=datasheet_limit,
-    )
-
-    # ---------------------------------------------------------
-    # Risk tolerance -> robust-z threshold
-    #
-    # Existing Phase 7 threshold mapping is preserved.
-    # ---------------------------------------------------------
-
-    z_threshold = (
-        2.0
-        + (risk_tolerance / 100.0) * 3.0
-    )
-
-    # ---------------------------------------------------------
-    # 1. Module B — 168h prediction
-    #
-    # IMPORTANT:
-    # predict_168h() only uses 0h/24h features.
-    # ---------------------------------------------------------
-
-    screened_gate1 = predict_168h(raw)
-
-    # ---------------------------------------------------------
-    # 2. Prediction evaluation
-    #
-    # The actual 168h measurement is used ONLY for evaluation.
-    # It is not fed into Module B.
-    # ---------------------------------------------------------
-
-    actual = pd.to_numeric(
-        screened_gate1["value_168h"],
-        errors="coerce",
-    )
-
-    predicted = pd.to_numeric(
-        screened_gate1["predicted_168h"],
-        errors="coerce",
-    )
-
-    error = (
-        predicted - actual
-    ).abs()
-
-    valid = (
-        actual.notna()
-        & predicted.notna()
-    )
-
-    if valid.any():
-
-        mae = float(
-            error[valid].mean()
-        )
-
-    else:
-
-        mae = None
-
-    # ---------------------------------------------------------
-    # Per-parameter MAE
-    # ---------------------------------------------------------
-
-    mae_by_parameter = {}
-
-    if (
-        "parameter" in screened_gate1.columns
-        and valid.any()
-    ):
-
-        valid_rows = screened_gate1.loc[valid]
-
-        for parameter, group in valid_rows.groupby(
+    if "parameter" in out_df.columns:
+        param_groups = out_df.groupby(
             "parameter",
             sort=False,
-        ):
-
-            mae_by_parameter[
-                str(parameter)
-            ] = float(
-                error.loc[group.index].mean()
-            )
-
-    # ---------------------------------------------------------
-    # 3. Safety slope
-    #
-    # This operates downstream of prediction and remains
-    # separate from the ML prediction model.
-    # ---------------------------------------------------------
-
-    screened_gate2 = calculate_safety_slope(
-        screened_gate1,
-        threshold=z_threshold,
-    )
-
-    # ---------------------------------------------------------
-    # 4. Module A — anomaly detection
-    #
-    # Module A uses the 0h/24h/96h information.
-    # No 168h-derived feature should enter this stage.
-    # ---------------------------------------------------------
-
-    screened_gate3 = detect_anomalies(
-        screened_gate2,
-        threshold=z_threshold,
-        risk_tolerance=risk_tolerance,
-    )
-
-    # ---------------------------------------------------------
-    # 5. Decision engine
-    #
-    # Converts the independent signals into:
-    #
-    #   PASS
-    #   WATCH
-    #   REJECT
-    #
-    # together with deterministic reason codes.
-    # ---------------------------------------------------------
-
-    screened_gate4 = apply_decision_engine(
-        screened_gate3
-    )
-
-    # ---------------------------------------------------------
-    # 6. Deterministic explainability
-    # ---------------------------------------------------------
-
-    screened = apply_explainability(
-        screened_gate4
-    )
-
-    # ---------------------------------------------------------
-    # Response columns
-    # ---------------------------------------------------------
-
-    payload_cols = [
-        "part_id",
-        "lot_id",
-        "parameter",
-
-        "value_0h",
-        "value_24h",
-        "value_96h",
-        "value_168h",
-
-        "predicted_168h",
-
-        "robust_z_score",
-        "isolation_forest_score",
-        "is_anomaly",
-
-        "safety_slope_exceeded",
-
-        "status",
-        "reason_codes",
-        "justification",
-        "is_flagged",
-
-        "datasheet_limit",
-
-        "predicted_drift_rate",
-        "safety_slope",
-    ]
-
-    # Only return columns actually generated by the pipeline.
-    available_payload_cols = [
-        column
-        for column in payload_cols
-        if column in screened.columns
-    ]
-
-    data = (
-        screened[available_payload_cols]
-        .rename(
-            columns={
-                "part_id": "ComponentID",
-                "lot_id": "Lot",
-
-                "value_0h": "Value_0h",
-                "value_24h": "Value_24h",
-                "value_96h": "Value_96h",
-                "value_168h": "Value_168h",
-            }
         )
-    )
-
-    # ---------------------------------------------------------
-    # Convert to JSON-safe records
-    # ---------------------------------------------------------
-
-    records = records_to_json(data)
-
-    # ---------------------------------------------------------
-    # Component count
-    #
-    # A component may have multiple parametric records.
-    #
-    # Therefore:
-    #
-    #   components       = unique components
-    #   parametric_records = actual output rows
-    # ---------------------------------------------------------
-
-    if "part_id" in screened.columns:
-
-        component_count = int(
-            screened["part_id"].nunique()
-        )
-
     else:
+        param_groups = [
+            (
+                normalize_parameter(
+                    "leakage_current"
+                ),
+                out_df,
+            )
+        ]
 
-        component_count = len(records)
+    for parameter, group in param_groups:
+        idx = group.index
 
-    # ---------------------------------------------------------
-    # Flagged count
-    # ---------------------------------------------------------
+        predictions = _predict_group(
+            feat.loc[idx],
+            parameter,
+        )
 
-    flagged_count = sum(
-        1
-        for row in records
-        if row.get("is_flagged")
+        out_df.loc[
+            idx,
+            "predicted_168h"
+        ] = predictions
+
+    # Correct drift definition:
+    # forecasted 24h -> predicted 168h over 144 hours.
+    v24 = pd_to_numeric_safe(
+        out_df["value_24h"]
     )
 
-    # ---------------------------------------------------------
-    # Final response
-    # ---------------------------------------------------------
+    out_df["predicted_drift_rate"] = (
+        out_df["predicted_168h"] - v24
+    ) / 144.0
 
-    return {
-        "components": component_count,
+    return out_df
 
-        "parametric_records": len(records),
 
-        "flagged_count": int(
-            flagged_count
-        ),
+def pd_to_numeric_safe(series):
+    """
+    Convert a pandas Series to numeric values safely.
+    """
+    import pandas as pd
 
-        "mae": mae,
-
-        "mae_by_parameter": mae_by_parameter,
-
-        "data": records,
-    }
+    return pd.to_numeric(
+        series,
+        errors="coerce",
+    )

@@ -26,3 +26,16 @@ def apply_explainability(df: pd.DataFrame) -> pd.DataFrame:
     out["justification"] = out["reason_codes"].apply(generate_deterministic_explanation)
     
     return out
+
+def generate_single_justification(data: dict) -> str:
+    """Generate an on-demand explanation for one screening record."""
+    if not isinstance(data, dict):
+        raise ValueError("Expected a JSON object containing screening results.")
+
+    reason_codes = data.get("reason_codes", [])
+    if isinstance(reason_codes, str):
+        reason_codes = [reason_codes]
+    if not isinstance(reason_codes, list):
+        raise ValueError("reason_codes must be a list of strings.")
+
+    return generate_deterministic_explanation(reason_codes)
