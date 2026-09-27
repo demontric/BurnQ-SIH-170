@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.ensemble import IsolationForest
+from config.thresholds import THRESHOLDS
 
 def cost_sensitive_isolation_forest_threshold(anomaly_scores, risk_tolerance=50.0):
     """
@@ -10,7 +11,7 @@ def cost_sensitive_isolation_forest_threshold(anomaly_scores, risk_tolerance=50.
     100 = Catch only massive outliers (Low False Positives, High False Negatives).
     """
     # IsolationForest decision_function: negative scores are anomalies, positive are normal.
-    base_threshold = -0.1
+    base_threshold = THRESHOLDS.get("module_a", {}).get("isolation_forest", -0.1)
 
     # Low risk tolerance increases the threshold (closer to 0 or positive)
     modifier = (50.0 - risk_tolerance) * 0.005

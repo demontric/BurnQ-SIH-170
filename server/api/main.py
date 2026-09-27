@@ -75,7 +75,7 @@ async def detect_anomaly_endpoint(
 @app.post("/predict-drift", tags=["Standalone Modules"])
 async def predict_drift_endpoint(file: UploadFile = File(...)):
     """
-    Standalone Module B execution (Forecast 168h).
+    Standalone Module B execution (Forecast 168h from 0h/24h only).
     Useful for isolated testing of the regression model without the full pipeline.
     """
     if not file.filename.endswith('.csv'):
@@ -85,7 +85,7 @@ async def predict_drift_endpoint(file: UploadFile = File(...)):
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
 
-        req_cols = ['value_0h', 'value_24h', 'value_96h', 'parameter']
+        req_cols = ['value_0h', 'value_24h', 'parameter']
         missing = [c for c in req_cols if c not in df.columns]
         if missing:
              raise ValueError(f"Missing required columns: {missing}")
