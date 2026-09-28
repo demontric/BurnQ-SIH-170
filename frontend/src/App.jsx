@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   ChevronDown,
   Crosshair,
+  Download,
   Info,
   LineChart,
   Loader2,
@@ -164,6 +165,8 @@ function normalizeRow(row) {
       : ''
 
   return {
+    ...row,
+
     ComponentID:
       row.ComponentID ?? row.component_id ?? row.part_id ?? row.PartID ?? '—',
     Lot: lotKey(row.Lot ?? row.lot_id ?? row.lot),
@@ -658,6 +661,61 @@ function BouncingDots() {
       <div className="size-2.5 rounded-full bg-amber-500 animate-bounce"></div>
     </div>
   )
+}
+
+function downloadRowsAsCsv(rows) {
+  if (!rows || rows.length === 0) return
+
+  const allKeys = [...new Set(rows.flatMap((row) => Object.keys(row)))]
+
+  const escapeCsvValue = (value) => {
+    if (value == null) return ''
+
+    let normalizedValue = value
+
+    if (Array.isArray(normalizedValue)) {
+      normalizedValue = normalizedValue.join('; ')
+    } else if (typeof normalizedValue === 'object') {
+      normalizedValue = JSON.stringify(normalizedValue)
+    }
+
+    const stringValue = String(normalizedValue)
+
+    if (
+      stringValue.includes(',') ||
+      stringValue.includes('"') ||
+      stringValue.includes('\n') ||
+      stringValue.includes('\r')
+    ) {
+      return `"${stringValue.replaceAll('"', '""')}"`
+    }
+
+    return stringValue
+  }
+
+  const csvHeader = allKeys.map(escapeCsvValue).join(',')
+
+  const csvRows = rows.map((row) =>
+    allKeys.map((key) => escapeCsvValue(row[key])).join(','),
+  )
+
+  const csvContent = `\uFEFF${[csvHeader, ...csvRows].join('\r\n')}`
+
+  const blob = new Blob([csvContent], {
+    type: 'text/csv;charset=utf-8;',
+  })
+
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+
+  link.href = url
+  link.download = 'burnq_screening_results.csv'
+
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+
+  URL.revokeObjectURL(url)
 }
 
 function ComponentRegistry({
@@ -1418,16 +1476,38 @@ export default function App() {
           ) : (
             <Card className="flex h-full flex-col border-slate-800 bg-slate-900/70 ring-slate-800">
               <CardHeader className="shrink-0 pb-2">
-                <CardTitle className="text-slate-50">
-                  Component Registry
-                </CardTitle>
-                <CardDescription className="text-slate-400">
-                  {lotFilter === 'all' && parameterFilter === 'all'
-                    ? 'All lots, all parameters. Click a row to expand the model justification.'
-                    : `${lotFilter === 'all' ? 'All lots' : `Lot ${lotFilter}`} · ${
-                        parameterFilter === 'all' ? 'all parameters' : humanizeParameter(parameterFilter)
-                      } — ${filteredRows.length} record${filteredRows.length === 1 ? '' : 's'} (${componentCount} component${componentCount === 1 ? '' : 's'}).`}
-                </CardDescription>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <CardTitle className="text-slate-50">
+                      Component Registry
+                    </CardTitle>
+
+                    <CardDescription className="text-slate-400">
+                      {lotFilter === 'all' && parameterFilter === 'all'
+                        ? 'All lots, all parameters. Click a row to expand the model justification.'
+                        : `${lotFilter === 'all' ? 'All lots' : `Lot ${lotFilter}`} · ${
+                            parameterFilter === 'all'
+                              ? 'all parameters'
+                              : humanizeParameter(parameterFilter)
+                          } — ${filteredRows.length} record${
+                            filteredRows.length === 1 ? '' : 's'
+                          } (${componentCount} component${
+                            componentCount === 1 ? '' : 's'
+                          }).`}
+                    </CardDescription>
+                  </div>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => downloadRowsAsCsv(filteredRows)}
+                    disabled={loading || filteredRows.length === 0}
+                    className="h-9 shrink-0 border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-slate-100"
+                  >
+                    <Download className="mr-2 size-4" />
+                    Download CSV
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="min-h-0 flex-1 overflow-hidden pb-4">
                 <div className="h-full overflow-auto border border-slate-800 bg-slate-950/40">
